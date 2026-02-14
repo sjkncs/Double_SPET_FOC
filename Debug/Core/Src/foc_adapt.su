@@ -1,0 +1,10 @@
+../Core/Src/foc_adapt.c:85:16:compute_wLs_factor	0	static
+../Core/Src/foc_adapt.c:99:13:FOC_UpdateDecoupleFactors	8	static
+../Core/Src/foc_adapt.c:18:9:RPM_to_AngleDelta	0	static
+../Core/Src/foc_adapt.c:30:6:ADC_CalibrateOffset	12	static
+../Core/Src/foc_adapt.c:65:6:Debug_ReadCurrent_mA	0	static
+../Core/Src/foc_adapt.c:112:6:FOC_UpdatePI_ByVbus	24	static
+../Core/Src/foc_adapt.c:138:6:FOC_SetM1Ls	0	static
+../Core/Src/foc_adapt.c:139:7:FOC_GetM1Ls	0	static
+../Core/Src/foc_adapt.c:140:6:FOC_SetM2Ls	0	static
+../Core/Src/foc_adapt.c:141:7:FOC_GetM2Ls	0	static

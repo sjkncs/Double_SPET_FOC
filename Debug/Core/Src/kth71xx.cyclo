@@ -1,0 +1,16 @@
+../Core/Src/kth71xx.c:39:16:crc8_calc	3
+../Core/Src/kth71xx.c:48:16:crc8_verify	2
+../Core/Src/kth71xx.c:72:13:spi_tx	5
+../Core/Src/kth71xx.c:97:13:spi_tx_then_rx	7
+../Core/Src/kth71xx.c:135:9:KTH71_ReadAngle	2
+../Core/Src/kth71xx.c:147:9:KTH71_ReadReg	1
+../Core/Src/kth71xx.c:287:16:calib_get_status	2
+../Core/Src/kth71xx.c:157:9:KTH71_WriteReg	1
+../Core/Src/kth71xx.c:276:16:calib_start	3
+../Core/Src/kth71xx.c:296:13:calib_end	2
+../Core/Src/kth71xx.c:165:6:KTH71_UnlockReg	1
+../Core/Src/kth71xx.c:173:6:KTH71_LockReg	1
+../Core/Src/kth71xx.c:181:6:KTH71_WriteRegToMTP	2
+../Core/Src/kth71xx.c:190:6:KTH71_WriteZero	3
+../Core/Src/kth71xx.c:208:6:KTH7111_ReadDual	13
+../Core/Src/kth71xx.c:307:9:KTH71_CalibRunBlocking	12

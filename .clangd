@@ -1,0 +1,12 @@
+# 让 clangd 使用与 STM32CubeIDE 一致的包含路径和宏，避免 "main.h not found" 及连锁报错
+CompileFlags:
+  Add:
+    - -ICore/Inc
+    - -IDrivers/STM32G4xx_HAL_Driver/Inc
+    - -IDrivers/STM32G4xx_HAL_Driver/Inc/Legacy
+    - -IDrivers/CMSIS/Device/ST/STM32G4xx/Include
+    - -IDrivers/CMSIS/Include
+    - -DUSE_HAL_DRIVER
+    - -DSTM32G474xx
+    - -DUSE_FULL_LL_DRIVER
+    - --target=arm-none-eabi

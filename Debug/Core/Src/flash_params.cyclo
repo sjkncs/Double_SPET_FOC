@@ -1,0 +1,5 @@
+../Core/Src/flash_params.c:14:17:crc32_update	3
+../Core/Src/flash_params.c:26:17:calc_crc	1
+../Core/Src/flash_params.c:35:6:FlashParams_Read	3
+../Core/Src/flash_params.c:50:6:FlashParams_Write	6
+../Core/Src/flash_params.c:99:6:FlashParams_Erase	2

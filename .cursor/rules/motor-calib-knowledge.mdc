@@ -1,0 +1,118 @@
+---
+description: 电机校准模块的设计决策、测量经验、硬件参数与功能状态记录
+globs: Core/**/*.c,Core/**/*.h
+alwaysApply: false
+---
+
+# 校准与调试知识库
+
+## 功能完成度 (截至 2026-02-14)
+| 功能 | M1 | M2 | 备注 |
+|------|----|----|------|
+| 电流环 Rs/Ls 自校准 | **已实现** | **已验证** | 开环电压注入, M2实测 Rs=23.3Ω Ls=7.83mH |
+| PI 自动整定 + 安全裕量 0.8 | **已实现** | **已验证** | 校准后自动写入 |
+| PI Vbus 自适应 | **已实现** | **已验证** | 独立校准标志保护, 基于 g_Mx_PI_Base |
+| Flash 持久化 | **已实现** | **已验证** | M1/M2 独立字段, 自动保存+开机加载 |
+| dq 前馈解耦 | **已实现** | **已验证** | g_M1_wLs_factor / g_M2_wLs_factor |
+| 电角度零点标定 | **已实现** | **已验证** | g_ZeroCalibAngle_M1/M2 独立 |
+| KTH71 ANLC 非线性校准 | — | **已验证** | 二次校准 BUG 已修复 |
+| VOFA 引擎 (TIM4) | **已实现** | **已验证** | 6 种数据源含 M1 校准 |
+| dq 阶跃响应录制/回放 | — | **已验证** | 双轴顺序采集 + VOFA 回放 |
+| 逆Park延迟补偿 | **已实现** | **已验证** | angle+speed_dpp, 对称 |
+| Vq 饱和诊断 | **已实现** | **已验证** | g_M1/M2_VqSaturated |
+| 速度/位置/步距角闭环 | **已实现** | **已验证** | 全模式 M1/M2 对称 |
+| Id 自适应 (Standby/Hold/Boost) | **已实现** | **已验证** | 三级+迟滞 |
+
+## 硬件平台
+- MCU: STM32G474CC (256KB Flash, 128KB RAM)
+- 电机: 8HA0205-10 两相步进电机
+- 供电: 标称 12V，实测 Vbus ≈ 13.7V（注意不要硬编码 12V）
+- 电流采样满量程 (I_FULLSCALE): 825mA (由 current_scale_si 参数决定)
+
+## 电机规格 vs 实测
+- Rs: 规格 20.3Ω, 实测 23.3Ω (+15%) — 多出约 3Ω 为引线+接插件电阻，对 PI 调参是正确值
+- Ls: 规格 5.3mH, 实测 7.83mH (+48%) @293mA — 低电流铁芯未饱和，更高电流会更接近规格
+
+## 关键设计决策
+
+### 1. 采用开环电压注入（非闭环电流注入）
+- 原因：不依赖预设 PI 参数，不同电机无需查手册即可校准
+- 实现：ISR 中 `g_CalibVdDirectActive` 标志跳过 PI，直接写 Vd 占空比
+- 参考：ST MCSDK profiler_dcac.c + profiler_impedest.c
+
+### 2. 校准电流选择原则
+- **校准电流应接近应用中典型的工作电流**
+- Ls 随电流增大而降低（铁芯饱和），低电流测出的 Ls 偏高导致 Kp 偏激进
+- dc_current_limit_amp=0.3A, dc_duty_max_q15=60%，实际由电流限约束
+
+### 3. PI 安全裕量
+- 计算出的 Kp/Ki 乘以 0.8（即 ×4/5），吸收 R/L 测量误差 + 温漂
+
+### 4. 校准时序（总计约 3 秒）
+- DC_RAMP→DC_SETTLE(300ms)→DC_MEASURE(200点)→AC_SETTLE(200ms)→AC_MEASURE(2000点)→RAMP_DOWN
+
+### 5. Flash 持久化
+- 校准数据自动写入 Flash Page 127 (0x0803F800)，开机自动加载
+- 链接脚本已预留最后 2KB (FLASH_PARAMS 区域)
+- 写入前关 HRTIM PWM 输出（CPU stall ~40ms 期间 ISR 不运行）
+- 数据结构含 Magic(0xCA1B0001) + CRC32 校验
+- Live Watch 置 g_FlashParamsErase=1 手动擦除，回退编译时默认值
+
+### 6. PI Vbus 自适应
+- `FOC_UpdatePI_ByVbus()` 基于 `g_Mx_PI_Base` (不再是硬编码 NOM)
+- 基准来自 Flash 加载或校准结果，包含 kp/ki/vbus_calib
+- 公式: kp_actual = kp_base × vbus_base / vbus_actual
+
+### 7. dq 前馈解耦
+- **仅闭环模式生效** (编码器角度可靠)
+- **开环模式严格禁止** — 丢步时 dq 坐标系错误导致正反馈→电流失控
+- ISR 中 PI 输出后、圆限幅前叠加: Vd-=ωe×Ls×Iq, Vq+=ωe×Ls×Id
+- wLs_factor 由主循环预计算，随 Ls/Vbus 变化更新
+
+### 8. KTH7111 ANLC 非线性校准
+- **触发**: Live Watch 置 `g_DoKth71Calib=1`，主循环调用 `Main_RunKth71Calib()`（阻塞式）
+- **前置条件**: 电机需先在开环模式下旋转（推荐 100~1000 RPM），需先设好 `g_M2_Iq_Ref_mA`
+- **芯片行为**: 校准期间 ANLC_STATUS = BUSY(1)，PWM 引脚 3.8Hz 闪烁；完成 = DONE(3)，失败 = FAIL(2)
+- **存储**: 校准结果存入芯片 volatile 寄存器，需写 MTP 才能掉电保存
+- **关键陷阱 — 二次校准失败 (已修复, 2026-02-13 实测通过)**: 
+  - **现象**: 首次上电校准成功, 不断电再次触发校准则超时失败; 电机只转约 1s 就停, PWM LED 不闪
+  - **根因**: 首次校准后 ANLC_STATUS 残留 DONE(3)，再次写 REG_CAL=1 芯片不接受重启
+  - **解决 (`kth71xx.c KTH71_CalibRunBlocking`)**: 
+    1. UnlockReg 后先 `calib_end()` (REG_CAL=0) + `HAL_Delay(200ms)` 让芯片状态机复位到 IDLE
+    2. 然后 `calib_start()` (REG_CAL=1) 开始新校准
+    3. 轮询须先等 BUSY(1) 确认真正开始 (2s 超时)，再等 DONE(3)，否则会误读旧 DONE
+  - **验证方法**: 连续触发 `g_DoKth71Calib=1` 多次, 每次 VOFA I0 应 3(POLLING)→4(DONE), PWM LED 闪烁
+- **VOFA 调试**: `g_VofaSrc = VOFA_SRC_KTH71_CALIB`，I0=DbgStep(4=DONE/6=TIMEOUT)
+
+### 9. VOFA 引擎架构决策
+- **问题**: 各模块分散管理 DMA 发送，while(1) 被 HAL_Delay 阻塞时无波形
+- **方案**: TIM4 (1kHz, 最低优先级 10) 集中调度，模块只需填帧
+- **默认状态**: `VOFA_SRC_IDLE` — 不发送任何数据，避免干扰
+- **好处**: 新增调试模式只需 ① 枚举加一项 ② 写 fill_xxx() ③ switch 加 case
+
+## 常见陷阱
+1. Clang linter 误报：ARM GCC 头文件找不到是假阳性，不影响实际编译
+2. Rs 偏高不是 bug：包含引线电阻，对 PI 调参反而更正确
+3. Ls 偏高是物理现象：需在更高电流点校准，而非修改算法
+4. VOFA 显示：Ls 已转换为 mH 单位输出（乘了 1000）
+5. Flash 写入后需 Clean + Rebuild（链接脚本改动）
+6. KTH71 ANLC 二次校准失败：必须先 REG_CAL=0 + 延时，否则芯片状态机不复位
+7. KTH71 PWM LED 可用于硬件确认校准状态：闪烁=BUSY，常高=DONE，常低=FAIL
+8. **步距角闭环必须在机械位置空间，不能在电角度空间**：50极对电机中，1°机械偏差=50°电角度=9102 Q15，导致增益×50放大→剧烈振荡。Trinamic/SimpleFOC 均使用机械位置 (encoder counts) 做位置控制
+9. 速度环默认参数: kp=0.5, ki=0.01, integ_limit=100, out_limit=300, Id_Hold=50mA
+10. **步距角PD已结构体化** (`g_M2_StepAnglePD`, PosPID_Float_t)：Live Watch 展开一个变量即可调全部参数，不再散装8个独立变量
+11. **Id自适应降流**(Trinamic IRun/IHold 模式): 静止500ms后 Id 从 50mA 降到 25mA，运动时立即恢复。可通过 `g_M2_Id_Eff_mA` 观测实际电流
+12. **静止检测坑**: 编码器量化噪声导致静止时 Δenc 有 ±1 count 抖动，`abs_d == 0` 永远不满足 → 必须用 `abs_d <= 1`
+13. **步距角默认 ki=0.002**: 加入微小积分消除稳态位置偏差 (纯PD有微小残差)
+14. **级联架构(位置P→速度P-only)仅用于位置模式**: 速度PI的积分在位置回归时产生过冲，需用P-only内环。但级联降低带宽
+15. **步距角模式不适合级联架构**: 级联(P→速度PI/P)带宽下降严重，归位不如直接PD丝滑。已回退为直接PD→Iq(弹簧-阻尼器)。D项用速度误差(speed-RPM_Cmd)防匀速拖拽
+16. **位置模式必须用 PI-P 结构**: 双P-only级联(位置P+速度P)没有积分器, 12mA Iq 推不动电机(摩擦/齿槽死区)→位置误差永远消不掉。外环加积分(ki=0.0005)后误差缓慢爬升→积分力矩克服摩擦→电机动起来
+17. **M1/M2 对比审查发现的 4 个 BUG (2026-02-14 修复)**:
+    - **ADC 偏移交换**: `ADC_CalibrateOffset()` 中 `acc_m1ia` 读 `ADC2->JDR1`，但 ISR 中 M1_Ia 读 `ADC1->JDR1`——偏移量对应了错误的 ADC 通道，导致 M1 电流采样偏差
+    - **M1 逆 Park 无延迟补偿**: M2 用 `angle + speed_dpp` 补偿 ADC→PWM 延迟，M1 直接用原始角度——高速时 M1 力矩损失
+    - **`FOC_UpdatePI_ByVbus()` 只检查 M2 校准标志**: M1 校准期间 PI 被主循环 Vbus 缩放覆盖，校准数据不可信
+    - **`g_ZeroCalibAngle` 共享**: 单个全局变量被 M1/M2 共享，上电只同步 Enc2 → M1 校准使用错误 old_zero → 已拆分为 `g_ZeroCalibAngle_M1` / `g_ZeroCalibAngle_M2`，`ZeroCalib_Motor_t` 新增 `p_zero_calib_angle` 指针
+18. **M1/M2 对称修复 (2026-02-14)**:
+    - 新增 `g_M1_VqSaturated` — 与 M2 对称的 Vq 饱和诊断标志
+    - M1 电角度更新增加 `g_CurrLoopCalibInProgress_M1` 保护 — 校准时保持 0°
+    - M1 while(1) 开环/步距角 Idq_Ref 赋值增加 `!g_CurrLoopCalibInProgress_M1` 守卫

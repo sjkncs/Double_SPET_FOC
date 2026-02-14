@@ -1,0 +1,8 @@
+../Core/Src/calib_platform_m2.c:39:13:plat_setVd	0	static
+../Core/Src/calib_platform_m2.c:45:13:plat_getIdq	0	static
+../Core/Src/calib_platform_m2.c:60:13:plat_getVdq	0	static
+../Core/Src/calib_platform_m2.c:75:17:plat_getVbusMv	0	static
+../Core/Src/calib_platform_m2.c:82:6:CalibM2_Start	88	static
+../Core/Src/calib_platform_m2.c:124:6:CalibM2_OnDone	128	static
+../Core/Src/calib_platform_m2.c:195:6:CalibM2_OnTIM3_1ms	8	static
+../Core/Src/calib_platform_m2.c:217:6:CalibM2_FillVofa	40	static

@@ -1,0 +1,9 @@
+../Core/Src/curr_loop_autocalib.c:50:14:q15_to_current_si	1
+../Core/Src/curr_loop_autocalib.c:55:14:q15_to_voltage_si	1
+../Core/Src/curr_loop_autocalib.c:62:6:CurrLoopCalib_Params_SetDefaults	2
+../Core/Src/curr_loop_autocalib.c:86:6:CurrLoopCalib_Init	4
+../Core/Src/curr_loop_autocalib.c:99:6:CurrLoopCalib_Start	3
+../Core/Src/curr_loop_autocalib.c:122:23:CurrLoopCalib_Run	50
+../Core/Src/curr_loop_autocalib.c:317:6:CurrLoopCalib_GetStateAndCounter	4
+../Core/Src/curr_loop_autocalib.c:327:6:CurrLoopCalib_GetResult	3
+../Core/Src/curr_loop_autocalib.c:335:6:CurrLoopCalib_ComputePI_Q15	11

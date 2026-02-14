@@ -1,0 +1,131 @@
+---
+description: g474-48 项目编码约定与架构概览
+alwaysApply: true
+---
+
+# 项目概览
+
+STM32G474 双电机 FOC 控制器（M1 + M2），使用 STM32CubeIDE。
+
+## 架构分层
+
+### ISR 层（实时控制）
+- `stm32g4xx_it.c` ADC1_2_IRQHandler (17kHz): FOC 核心 — Park/Clarke 变换、PI 控制、SVPWM、dq 解耦、阶跃录制
+- `stm32g4xx_it.c` TIM3_IRQHandler (1kHz, 优先级 3): 速度环、位置环、电流环校准状态机驱动 (`CalibM2_OnTIM3_1ms` / `CalibM1_OnTIM3_1ms`)
+- `stm32g4xx_it.c` TIM4_IRQHandler (1kHz, 优先级 10): VOFA 引擎 — 自动填帧 + DMA 发送 (`Vofa_OnTIM4_1ms`)
+
+### 模块层
+- `vofa_engine.c/h`: **VOFA+ 调试波形引擎** — TIM4 1kHz 状态机，集中管理所有 VOFA 数据源和 DMA 发送
+- `main.c`: 主循环编排（状态触发、模式切换、Flash 加载/擦除、阶跃测试轴切换）
+- `zero_calib.c/h`: 电角度零点标定（Id 吸合摆动 + 编码器 ZERO 写入, 阻塞式）
+- `calib_platform_m2.c/h`: M2 电流环校准平台层（回调 + 启动/完成 + TIM3 驱动 + `CalibM2_FillVofa` 帧填充）
+- `curr_loop_autocalib.c/h`: 电流环自校准引擎（纯算法，不直接访问硬件寄存器）
+- `foc_adapt.c/h`: FOC 自适应辅助（PI Vbus 缩放 + dq 解耦 + ADC 校准 + 调试）
+- `flash_params.c/h`: Flash 校准参数持久化（Page 127, Magic+CRC32）
+- `kth71xx.c/h`: KTH7111 编码器驱动 + ANLC 非线性校准
+
+## VOFA+ 调试引擎 (`vofa_engine`)
+
+### 架构
+- **TIM4 (1kHz, 优先级 10 最低)** 每 1ms 自动填帧 + DMA 发送
+- 各模块只需设 `g_VofaSrc` 切换数据源，无需关心 DMA
+- 即使 while(1) 被 HAL_Delay 阻塞（如 KTH71 校准），TIM4 仍正常发送
+
+### 数据源枚举 (`VofaSrc_t`)
+| 枚举值 | 用途 | 通道含义 |
+|--------|------|---------|
+| `VOFA_SRC_IDLE` (默认) | 不发送 | — |
+| `VOFA_SRC_NORMAL` (速度模式) | 速度PI调试 | I0=RawRPM, I1=FiltRPM, I2=RpmCmd, I3=SpdErr, I4=PI积分, I5=PI_Iq, **I6=Id_Eff(mA)** |
+| `VOFA_SRC_NORMAL` (步距角模式) | 直接PD→Iq | I0=RawRPM, I1=FiltRPM, I2=PosErr, I3=积分(mA), I4=PD_Iq(mA), I5=圈数, **I6=Id_Eff(mA)** |
+| `VOFA_SRC_NORMAL` (位置模式) | 级联P→速度P-only | I0=RawRPM, I1=FiltRPM, I2=PosErr(counts), I3=外环SpdRef(RPM), I4=内环Iq(mA), I5=圈数, **I6=Id_Eff(mA)** |
+| `VOFA_SRC_CURR_CALIB` | 电流环 Rs/Ls 校准 | I0=State(7=DONE), I1=Counter, I2=ErrCode, I3=DC_Id(A), I4=Rs(Ω), I5=Ls(mH) |
+| `VOFA_SRC_KTH71_CALIB` | KTH71 ANLC 校准 | I0=DbgStep(4=DONE), I1=Id(mA), I2=Iq(mA), I3=Vd(Q15), I4=Vq(Q15), I5=Angle(°) |
+| `VOFA_SRC_STEP_PLAYBACK` | dq 阶跃响应回放 | I0=Id_ref, I1=Iq_ref, I2=Id_fbk, I3=Iq_fbk, I4=SampleIdx, I5=Phase+Toggle |
+
+### 使用方法
+1. 进入某模式前: `g_VofaSrc = VOFA_SRC_xxx;`
+2. 退出时: `g_VofaSrc = VOFA_SRC_NORMAL;` 或 `VOFA_SRC_IDLE;`
+3. 新增数据源: 枚举加一项 → `vofa_engine.c` 加 `fill_xxx()` → switch 加 case
+
+### 已删除的旧机制
+- ~~`g_VofaSendReady`~~: 不再需要（TIM4 自主发送）
+- ~~`Vofa_DmaSend()`~~: 不再需要（TIM4 内部处理）
+- ~~`Vofa_SendNormal()`~~: 已移入 `vofa_engine.c fill_normal()`
+- ~~`CalibM2_VofaMonitor()`~~: 已重构为 `CalibM2_FillVofa()`（只填帧，不发 DMA）
+
+## M2 控制模式 (`M2_CtrlMode_t`)
+| 值 | 模式 | Park角度 | D轴 | Q轴 | 适用场景 |
+|----|------|---------|-----|-----|---------|
+| 0 | OPEN_LOOP | θ_cmd(步进) | Id_Ref(mA) | Iq_Ref(mA) | 调试/初始启动 |
+| 1 | SPEED | θ_encoder | Id_Eff | 速度PI→Iq | 匀速运转 |
+| 2 | POSITION | θ_encoder | Id_Eff | **位置P→速度P-only→Iq** | 伺服定位 (级联) |
+| 3 | STEP_ANGLE | θ_encoder | Id_Eff | **直接PD→Iq** | 匀速步进 (高带宽) |
+
+### 架构说明
+- **速度模式**: 速度PI (含积分消稳态误差) + 斜坡限速
+- **位置模式**: PI-P 级联 — 位置PI(外环) → 速度P-only(内环) → Iq, 积分克服摩擦死区
+- **步距角模式**: 直接 PD→Iq (弹簧-阻尼器), 带宽高、归位丝滑, 不走速度环
+
+### 位置环 (M2_MODE_POSITION) — PI-P 级联架构
+- **外环**: `g_M2_PosPID` PI, kp=0.1 RPM/count, ki=0.01, integ_limit=300, out_limit=800RPM
+- **内环**: 复用 `g_M2_SpeedPI`, P-only (无积分 → 无过冲动量)
+- **积分作用**: 克服摩擦/齿槽力矩死区, 过零清积分防过冲
+- **参考**: `g_M2_PosCmd` (Live Watch 设绝对位置), "去到 X 停下"
+
+### 步距角闭环 (M2_MODE_STEP_ANGLE) — 直接PD
+- **架构**: 位置误差×kp(弹簧) - 速度误差×kd(阻尼) → Iq(mA), 不走速度环
+- **控制空间**: 机械位置 (encoder counts), **不是**电角度
+- **参数 (g_M2_StepAnglePD)**: kp=0.1 mA/count, kd=0.8 mA/RPM, ki=0.01, integ_limit=50, out_limit=300mA
+- **D项**: 用速度误差 (speed - RPM_Cmd), 匀速运转时阻尼力为零
+- **Id = Id_Eff_mA** (三级自适应: Standby/Hold/Boost)
+- **优势**: 带宽高, 归位无过冲; 代价是高速运转噪声略大于级联方案
+- **失步检测**: `|StepAngle_Err| > LossThresh(默认30°=5461 counts)` 时可报警
+
+### Id 三级自适应 (Standby / Hold / Boost + 迟滞)
+- **原理**: 复刻 Trinamic IRun/IHold + 增益调度, 根据状态三级调节磁弹簧刚度
+- **Standby(25mA)**: |speed|<5 且 |Δenc|≤18 持续 500ms → 省电
+- **Hold(50mA)**: 正常运行态
+- **Boost(100mA)**: |pos_err| > 500 counts(2.75°) → 增强刚度抗失步
+- **迟滞防抖**: 进入Boost阈值500, 退出阈值250, 避免边界抖振
+- **优先级**: Boost > Hold > Standby
+- **参数**: `Id_Standby=25, Id_Hold=50, Id_Boost=100, BoostEnter=500, BoostExit=250`
+- **诊断**: VOFA I6 = `g_M2_Id_Eff_mA`, 应能看到 25/50/100 三级阶梯
+
+## 关键全局变量（M2 电机）
+- `g_M2_Idq`, `g_M2_Idq_Ref`: 实测/参考 dq 电流
+- `g_M2_Vdq`: dq 电压输出
+- `g_M2_PI_d`, `g_M2_PI_q`: D/Q 轴 PI 控制器
+- `g_M2_PI_Base`: PI 基准参数 (Vbus 自适应缩放基准点)
+- `g_M2_wLs_factor`: dq 前馈解耦因子 (主循环预计算)
+- `g_M2_Id_Hold_mA`: 运行态 d 轴保持电流 IRun (磁弹簧, 速度/位置/步距角共用)
+- `g_M2_Id_Standby_mA/StandbyDelay_ms`: 静止态 Id IHold + 降流延时
+- `g_M2_Id_Eff_mA`: 当前有效 Id (ISR 写, 只读诊断)
+- `g_M2_StepAnglePD` (PosPID_Float_t): 步距角 PD 参数结构体 (Live Watch 展开调参)
+- `g_CalibVdDirectActive`: 校准开环电压注入标志
+- `g_CalibVdDirect`: 校准直接电压命令 Q15
+- `g_DoCurrLoopCalib`: 触发电流环校准（主循环检测）
+- `g_DoKth71Calib`: 触发 KTH71 ANLC 非线性校准
+- `g_DoZeroCalib`: 触发电角度零点标定
+- `g_CurrLoopCalibInProgress`: 校准进行中标志
+- `g_VofaSrc`: 当前 VOFA 数据源（`VofaSrc_t` 枚举）
+- `g_FlashParamsErase`: Live Watch 置 1 擦除 Flash 校准数据
+- `g_FlashParamsLoaded`: 开机 Flash 加载状态 (bit0=M1, bit1=M2)
+
+## 中断优先级（数值越小优先级越高）
+| 优先级 | 中断源 | 频率 | 职责 |
+|--------|--------|------|------|
+| 0 | HRTIM FLT | — | 硬件故障保护 |
+| 1 | ADC1_2 | 17kHz | FOC 电流环 |
+| 2 | HRTIM Master | — | PWM 周期更新 |
+| 3 | TIM3 | 1kHz | 速度环 / 位置环 / 校准驱动 |
+| 10 | TIM4 | 1kHz | VOFA 引擎（最低优先级） |
+
+## Flash 参数存储
+- `flash_params.h/c`: Page 127 (0x0803F800), Magic+CRC32 校验
+- 链接脚本 FLASH_PARAMS 区域已预留 2KB
+- 校准成功自动写入，写入前关 HRTIM PWM 输出
+
+## 编码规范
+- Q15 定点格式：int16_t 范围 [-32768, 32767] 映射到 [-1.0, 1.0)
+- 平台回调模式：算法模块通过函数指针访问硬件，不直接 include HAL
+- 所有中文注释，代码标识符用英文
