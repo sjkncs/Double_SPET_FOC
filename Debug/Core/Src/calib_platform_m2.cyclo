@@ -4,5 +4,5 @@
 ../Core/Src/calib_platform_m2.c:75:17:plat_getVbusMv	1
 ../Core/Src/calib_platform_m2.c:82:6:CalibM2_Start	1
 ../Core/Src/calib_platform_m2.c:124:6:CalibM2_OnDone	4
-../Core/Src/calib_platform_m2.c:195:6:CalibM2_OnTIM3_1ms	4
-../Core/Src/calib_platform_m2.c:217:6:CalibM2_FillVofa	1
+../Core/Src/calib_platform_m2.c:198:6:CalibM2_OnTIM3_1ms	4
+../Core/Src/calib_platform_m2.c:220:6:CalibM2_FillVofa	1

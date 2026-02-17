@@ -153,6 +153,10 @@ void KTH71_WriteRegToMTP(const KTH7111_Hw_t *hw);
  *  内部自行 Unlock/Lock, 调用前需确保 ISR 未占用 SPI */
 void KTH71_WriteZero(const KTH7111_Hw_t *hw, uint16_t angle);
 
+/** 从芯片 MTP 回读 ZERO 寄存器 (16-bit, ZERO_HI:ZERO_LO)
+ *  @return 当前零点角度 [0, 65535] */
+uint16_t KTH71_ReadZero(const KTH7111_Hw_t *hw);
+
 /* ====================================================================
  * API — 非线性自校准 (开环 600 rpm, 全程阻塞)
  *

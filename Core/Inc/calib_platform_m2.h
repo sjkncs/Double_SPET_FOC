@@ -21,14 +21,14 @@
  * @brief  启动 M2 电流环自校准
  *
  * 切开环模式, 角度/电流清零, 初始化校准引擎, 由 TIM3 1ms 驱动后续状态.
- * 调用后 g_CurrLoopCalibInProgress = 1, 主循环勿覆盖 M2 Idq_Ref.
+ * 调用后 g_CurrLoopCalibInProgress_M2 = 1, 主循环勿覆盖 M2 Idq_Ref.
  */
 void CalibM2_Start(void);
 
 /**
  * @brief  校准完成处理: 写 PI + Flash 持久化 + 发 VOFA 最终结果 + 恢复 PI 控制
  *
- * 仅在 g_CurrLoopCalibResultReady == 1 时由主循环调用.
+ * 仅在 g_CurrLoopCalibResultReady_M2 == 1 时由主循环调用.
  * 内部会关 PWM → Flash erase+program (~40ms) → 恢复 PWM.
  */
 void CalibM2_OnDone(void);
@@ -37,7 +37,7 @@ void CalibM2_OnDone(void);
  * @brief  TIM3 1ms 中断入口: 驱动校准状态机
  *
  * 若校准未启动则直接返回, 不影响其他 TIM3 任务.
- * DONE/ERROR 时置 g_CurrLoopCalibResultReady = 1, 由主循环处理.
+ * DONE/ERROR 时置 g_CurrLoopCalibResultReady_M2 = 1, 由主循环处理.
  */
 void CalibM2_OnTIM3_1ms(void);
 

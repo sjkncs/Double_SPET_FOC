@@ -4,7 +4,7 @@
  *
  * 设计思路:
  *   1. TIM4 (1kHz, 最低优先级) 每 1ms 执行一次
- *   2. 根据 g_VofaSrc 选择数据源, 填充 g_VofaFrame 6 个浮点通道
+ *   2. 根据 g_VofaSrc 选择数据源, 填充 g_VofaFrame 10 个浮点通道
  *   3. DMA 空闲时自动触发 USART1 DMA 发送
  *   4. 各模块只需写 g_VofaSrc 切换, 无需关心 DMA
  *
@@ -20,8 +20,9 @@
 #include "calib_platform_m1.h"     /* CalibM1_FillVofa() */
 
 /* ---- 全局: 当前 VOFA 数据源 (上电默认 IDLE, 不发送) ---- */
-volatile VofaSrc_t g_VofaSrc = VOFA_SRC_IDLE;
-volatile uint8_t g_VofaMotorSel = 0;    /* 0=M2(默认), 1=M1 */
+volatile VofaSrc_t g_VofaSrc = VOFA_SRC_NORMAL;
+volatile uint8_t g_VofaMotorSel = 1;    /* 0=M2(默认), 1=M1 */
+volatile uint8_t g_Kth71CalibMotor = 0;/* 0=M2, 1=M1 — KTH71 校准时填帧用 */
 
 /* ====================================================================
  * 各数据源填帧 (static, 仅本文件调用)
@@ -30,7 +31,7 @@ volatile uint8_t g_VofaMotorSel = 0;    /* 0=M2(默认), 1=M1 */
 /**
  * @brief  正常模式: 按控制模式自动切换 VOFA 通道
  *
- * === 速度模式 (M2_MODE_SPEED) ===
+ * === 速度模式 (MODE_SPEED) ===
  *   I0: 原始转速 RPM      — 观测编码器量化噪声
  *   I1: 滤波转速 RPM      — PI 实际反馈信号
  *   I2: 斜坡后 RPM 指令   — PI 实际跟踪目标
@@ -38,7 +39,7 @@ volatile uint8_t g_VofaMotorSel = 0;    /* 0=M2(默认), 1=M1 */
  *   I4: PI 积分 (mA)      — 积分饱和诊断
  *   I5: PI 输出 Iq (mA)   — 力矩电流指令
  *
- * === 步距角模式 (M2_MODE_STEP_ANGLE, 直接PD→Iq) ===
+ * === 步距角模式 (MODE_STEP_ANGLE, 直接PD→Iq) ===
  *   I0: 原始转速 RPM      — 观测平滑度
  *   I1: 滤波转速 RPM      — 阻尼D项反馈信号
  *   I2: 位置误差 (counts)  — 核心: 跟踪精度 + 失步诊断
@@ -46,7 +47,7 @@ volatile uint8_t g_VofaMotorSel = 0;    /* 0=M2(默认), 1=M1 */
  *   I4: PD 输出 Iq (mA)   — 力矩电流指令
  *   I5: 圈数              — 位置追踪 (StepAngle_Ref / 65536)
  *
- * === 位置模式 (M2_MODE_POSITION, 级联P→速度P-only) ===
+ * === 位置模式 (MODE_POSITION, 级联P→速度P-only) ===
  *   I0: 原始转速 RPM
  *   I1: 滤波转速 RPM
  *   I2: 位置误差 (counts)
@@ -58,6 +59,12 @@ volatile uint8_t g_VofaMotorSel = 0;    /* 0=M2(默认), 1=M1 */
  *   I0: 原始转速 RPM
  *   I1: 滤波转速 RPM
  *   I2~I5: 0 (无控制器输出)
+ *
+ * === 所有模式共享 ===
+ *   I6: Id_Eff (mA) — 三级自适应有效 Id (Standby/Hold/Boost)
+ *   I7: Id_fbk (mA) — 实时 d 轴电流反馈
+ *   I8: Iq_fbk (mA) — 实时 q 轴电流反馈
+ *   I9: VqSat 报警   — 0=正常, 1000=Vq 超出电压圆
  */
 static void fill_normal(void)
 {
@@ -67,17 +74,17 @@ static void fill_normal(void)
         g_VofaFrame.ch[0] = (float)g_Enc2_SpeedRPM;
         g_VofaFrame.ch[1] = (float)g_Enc2_SpeedFilt;
 
-        if (g_M2_CtrlMode == M2_MODE_SPEED) {
+        if (g_M2_CtrlMode == MODE_SPEED) {
             g_VofaFrame.ch[2] = g_Dbg_Spd_RpmCmd;
             g_VofaFrame.ch[3] = g_Dbg_Spd_Err;
             g_VofaFrame.ch[4] = g_M2_SpeedPI.integral;
             g_VofaFrame.ch[5] = g_Dbg_Spd_IqOut;
-        } else if (g_M2_CtrlMode == M2_MODE_STEP_ANGLE) {
+        } else if (g_M2_CtrlMode == MODE_STEP_ANGLE) {
             g_VofaFrame.ch[2] = (float)g_M2_StepAngle_Err;
             g_VofaFrame.ch[3] = g_M2_StepAnglePD.integral;
             g_VofaFrame.ch[4] = g_M2_StepAnglePD.output;
             g_VofaFrame.ch[5] = (float)(g_M2_StepAngle_Ref / 65536);
-        } else if (g_M2_CtrlMode == M2_MODE_POSITION) {
+        } else if (g_M2_CtrlMode == MODE_POSITION) {
             g_VofaFrame.ch[2] = g_Dbg_Pos_pTerm;
             g_VofaFrame.ch[3] = g_Dbg_Pos_iqmA;
             g_VofaFrame.ch[4] = g_Dbg_Pos_dTerm;
@@ -89,22 +96,25 @@ static void fill_normal(void)
             g_VofaFrame.ch[5] = 0.0f;
         }
         g_VofaFrame.ch[6] = (float)g_M2_Id_Eff_mA;
+        g_VofaFrame.ch[7] = (float)Q15_TO_MA(g_M2_Idq.d);
+        g_VofaFrame.ch[8] = (float)Q15_TO_MA(g_M2_Idq.q);
+        g_VofaFrame.ch[9] = g_M2_VqSaturated ? 1000.0f : 0.0f;
     } else {
         /* ---- M1 ---- */
         g_VofaFrame.ch[0] = (float)g_Enc1_SpeedRPM;
         g_VofaFrame.ch[1] = (float)g_Enc1_SpeedFilt;
 
-        if (g_M1_CtrlMode == M2_MODE_SPEED) {
+        if (g_M1_CtrlMode == MODE_SPEED) {
             g_VofaFrame.ch[2] = g_Dbg_M1_Spd_RpmCmd;
             g_VofaFrame.ch[3] = g_Dbg_M1_Spd_Err;
             g_VofaFrame.ch[4] = g_M1_SpeedPI.integral;
             g_VofaFrame.ch[5] = g_Dbg_M1_Spd_IqOut;
-        } else if (g_M1_CtrlMode == M2_MODE_STEP_ANGLE) {
+        } else if (g_M1_CtrlMode == MODE_STEP_ANGLE) {
             g_VofaFrame.ch[2] = (float)g_M1_StepAngle_Err;
             g_VofaFrame.ch[3] = g_M1_StepAnglePD.integral;
             g_VofaFrame.ch[4] = g_M1_StepAnglePD.output;
             g_VofaFrame.ch[5] = (float)(g_M1_StepAngle_Ref / 65536);
-        } else if (g_M1_CtrlMode == M2_MODE_POSITION) {
+        } else if (g_M1_CtrlMode == MODE_POSITION) {
             g_VofaFrame.ch[2] = g_Dbg_M1_Pos_pTerm;
             g_VofaFrame.ch[3] = g_Dbg_M1_Pos_iqmA;
             g_VofaFrame.ch[4] = g_Dbg_M1_Pos_dTerm;
@@ -116,6 +126,9 @@ static void fill_normal(void)
             g_VofaFrame.ch[5] = 0.0f;
         }
         g_VofaFrame.ch[6] = (float)g_M1_Id_Eff_mA;
+        g_VofaFrame.ch[7] = (float)Q15_TO_MA(g_M1_Idq.d);
+        g_VofaFrame.ch[8] = (float)Q15_TO_MA(g_M1_Idq.q);
+        g_VofaFrame.ch[9] = g_M1_VqSaturated ? 1000.0f : 0.0f;
     }
 }
 
@@ -135,12 +148,23 @@ static void fill_normal(void)
 static void fill_kth71_calib(void)
 {
     g_VofaFrame.ch[0] = (float)g_CalibDbgStep;
-    g_VofaFrame.ch[1] = (float)Q15_TO_MA(g_M2_Idq.d);
-    g_VofaFrame.ch[2] = (float)Q15_TO_MA(g_M2_Idq.q);
-    g_VofaFrame.ch[3] = (float)g_M2_Vdq.d;
-    g_VofaFrame.ch[4] = (float)g_M2_Vdq.q;
-    g_VofaFrame.ch[5] = (float)g_M2_ElecAngle_Q15 * (360.0f / 65536.0f);
+    if (g_Kth71CalibMotor == 0) {
+        g_VofaFrame.ch[1] = (float)Q15_TO_MA(g_M2_Idq.d);
+        g_VofaFrame.ch[2] = (float)Q15_TO_MA(g_M2_Idq.q);
+        g_VofaFrame.ch[3] = (float)g_M2_Vdq.d;
+        g_VofaFrame.ch[4] = (float)g_M2_Vdq.q;
+        g_VofaFrame.ch[5] = (float)g_M2_ElecAngle_Q15 * (360.0f / 65536.0f);
+    } else {
+        g_VofaFrame.ch[1] = (float)Q15_TO_MA(g_M1_Idq.d);
+        g_VofaFrame.ch[2] = (float)Q15_TO_MA(g_M1_Idq.q);
+        g_VofaFrame.ch[3] = (float)g_M1_Vdq.d;
+        g_VofaFrame.ch[4] = (float)g_M1_Vdq.q;
+        g_VofaFrame.ch[5] = (float)g_M1_ElecAngle_Q15 * (360.0f / 65536.0f);
+    }
     g_VofaFrame.ch[6] = 0.0f;
+    g_VofaFrame.ch[7] = 0.0f;
+    g_VofaFrame.ch[8] = 0.0f;
+    g_VofaFrame.ch[9] = 0.0f;
 }
 
 /**
@@ -180,6 +204,9 @@ static void fill_step_playback(void)
         g_VofaFrame.ch[4] = (float)s_stepPlayIdx;
         g_VofaFrame.ch[5] = (float)g_StepCapPhase + 100.0f * (float)s_vofaToggle;
         g_VofaFrame.ch[6] = 0.0f;
+        g_VofaFrame.ch[7] = 0.0f;
+        g_VofaFrame.ch[8] = 0.0f;
+        g_VofaFrame.ch[9] = 0.0f;
         s_stepPlayIdx++;
     }
 
@@ -190,9 +217,45 @@ static void fill_step_playback(void)
     }
 }
 
+/**
+ * @brief  M1→M2 随动模式: 双轴位置 + 跟随误差 (单位: 度)
+ *
+ * VOFA 通道:
+ *   I0: M1 位置 (°)         — 手轮/指令位置
+ *   I1: M2 位置 (°)         — 从动/实际位置
+ *   I2: 跟随误差 (°)        — StepAngle_Err 转度 (正=M2 落后)
+ *   I3: M2 PD 输出 Iq (mA)  — 跟随力矩
+ *   I4: M1 转速 (RPM)       — 手轮转动速度
+ *   I5: M2 转速 (RPM)       — 从动电机速度
+ *   I6~I9: M2 标准共享 (Id_Eff, Id_fbk, Iq_fbk, VqSat)
+ */
+static void fill_follow(void)
+{
+    const float cnt_to_deg = 360.0f / 65536.0f;
+
+    g_VofaFrame.ch[0] = (float)g_M1_PosFbk * cnt_to_deg;
+    g_VofaFrame.ch[1] = (float)g_M2_PosFbk * cnt_to_deg;
+    g_VofaFrame.ch[2] = (float)g_M2_StepAngle_Err * cnt_to_deg;
+    g_VofaFrame.ch[3] = g_M2_StepAnglePD.output;
+    g_VofaFrame.ch[4] = (float)g_Enc1_SpeedRPM;
+    g_VofaFrame.ch[5] = (float)g_Enc2_SpeedRPM;
+    g_VofaFrame.ch[6] = (float)g_M2_Id_Eff_mA;
+    g_VofaFrame.ch[7] = (float)Q15_TO_MA(g_M2_Idq.d);
+    g_VofaFrame.ch[8] = (float)Q15_TO_MA(g_M2_Idq.q);
+    g_VofaFrame.ch[9] = g_M2_VqSaturated ? 1000.0f : 0.0f;
+}
+
 /* ====================================================================
  * API 实现
  * ==================================================================== */
+
+void Vofa_InitDMA(void)
+{
+    LL_DMA_SetPeriphAddress(DMA1, LL_DMA_CHANNEL_1, (uint32_t)&USART1->TDR);
+    LL_DMA_SetMemoryAddress(DMA1, LL_DMA_CHANNEL_1, (uint32_t)&g_VofaFrame);
+    LL_DMA_EnableIT_TC(DMA1, LL_DMA_CHANNEL_1);
+    LL_USART_EnableDMAReq_TX(USART1);
+}
 
 void Vofa_StartTIM4(void)
 {
@@ -211,7 +274,7 @@ void Vofa_OnTIM4_1ms(void)
     case VOFA_SRC_NORMAL:
         fill_normal();
         break;
-    case VOFA_SRC_CURR_CALIB:
+    case VOFA_SRC_CURR_CALIB_M2:
         CalibM2_FillVofa();      /* 由 calib_platform_m2 填充 */
         break;
     case VOFA_SRC_CURR_CALIB_M1:
@@ -222,6 +285,9 @@ void Vofa_OnTIM4_1ms(void)
         break;
     case VOFA_SRC_STEP_PLAYBACK:
         fill_step_playback();
+        break;
+    case VOFA_SRC_FOLLOW:
+        fill_follow();
         break;
     default:
         return;                  /* 未知源: 不发送 */

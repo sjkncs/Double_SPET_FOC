@@ -3,6 +3,8 @@
 "./Core/Src/curr_loop_autocalib.o"
 "./Core/Src/flash_params.o"
 "./Core/Src/foc_adapt.o"
+"./Core/Src/foc_globals.o"
+"./Core/Src/follow_m1m2.o"
 "./Core/Src/kth71xx.o"
 "./Core/Src/main.o"
 "./Core/Src/stm32g4xx_hal_msp.o"

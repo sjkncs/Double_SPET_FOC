@@ -71,7 +71,7 @@ void CurrLoopCalib_Params_SetDefaults(CurrLoopCalib_Params_t *params)
     params->ls_max_henry            = 0.1f;
     /* DC */
     params->dc_current_limit_amp    = 0.3f;
-    params->dc_duty_max_q15         = 19661;  /* 60% full scale (safety cap) */
+    params->dc_duty_max_q15         = 27853;  /* 85% full scale (电流限是主保护, 占空比只是备用上限) */
     params->dc_ramp_rate_q15_per_ms = 98;     /* ~200ms ramp to 19661 */
     params->dc_settle_ms            = 300;
     params->dc_measure_samples      = 200;

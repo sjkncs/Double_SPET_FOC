@@ -19,7 +19,7 @@
  *   ⑤ 恢复: Id/Iq 清零
  *
  * 注意:
- *   - 调用前应先切到开环模式 (M2_MODE_OPEN_LOOP) 并等待 1s 以消除惯性
+ *   - 调用前应先切到开环模式 (MODE_OPEN_LOOP) 并等待 1s 以消除惯性
  *   - g_Kth71CalibActive 置 1 期间 ISR 暂停编码器 SPI, 避免总线竞争
  *   - mc->p_zero_calib_angle 用 C 变量记录 old_zero, 不读寄存器 (规避 ReadReg bug)
  * ==================================================================== */

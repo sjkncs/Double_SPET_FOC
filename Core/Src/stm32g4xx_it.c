@@ -56,6 +56,14 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* 前向声明: 定义在 USER CODE BEGIN 1 (文件末尾), 被 ADC1_2_IRQHandler 调用 */
+static inline void M1_UpdateElecAngle(void);
+static inline void M2_UpdateElecAngle(void);
+static inline int16_t CalcSpeedDpp(int16_t *prev, int16_t current);
+static inline void StepCap_Record(void);
+static void M1_ControlLoop(int16_t d1);
+static void M2_ControlLoop(int16_t d2);
+
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -252,49 +260,14 @@ void ADC1_2_IRQHandler(void)
 
   /* 读编码器耗时8.5us  - */
 
-  /* ---- M1 电角度更新 ---- */
-  if (g_CurrLoopCalibInProgress_M1) {
-      /* 电流环自校准中: 保持 0° 电角度，不更新 */
-  } else if (g_M1_CtrlMode == M2_MODE_OPEN_LOOP) {
-      OpenLoop_IncAngle(&g_M1_ElecAngle_Q15, &g_M1_AngleDelta, g_M1_AngleDelta_Target);
-  } else if (g_M1_CtrlMode == M2_MODE_STEP_ANGLE) {
-      g_M1_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc1_Angle * M1_POLE_PAIRS)
-                         + g_M1_ElecAngleOffset;
-      M1_OpenLoop_IncAngle_Ref();
-  } else {
-      /* 速度/位置闭环: 编码器角度 */
-      g_M1_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc1_Angle * M1_POLE_PAIRS)
-                         + g_M1_ElecAngleOffset;
-  }
+  /* ---- 电角度更新 (校准/开环/步距角/闭环 四路分发) ---- */
+  M1_UpdateElecAngle();
+  M2_UpdateElecAngle();
 
-  /* ---- M2 电角度更新 ---- */
-  if (g_CurrLoopCalibInProgress) {
-      /* 电流环自校准中: 保持 0° 电角度，不更新 */
-  } else if (g_M2_CtrlMode == M2_MODE_OPEN_LOOP) {
-      /* 开环: 外部步进角度 */
-      OpenLoop_IncAngle(&g_M2_ElecAngle_Q15, &g_M2_AngleDelta, g_M2_AngleDelta_Target);
-  } else if (g_M2_CtrlMode == M2_MODE_STEP_ANGLE) {
-      /* 步距角闭环: Park变换用编码器角度(确保dq正确), 同时递增角度指令 */
-      g_M2_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc2_Angle * M2_POLE_PAIRS)
-                         + g_M2_ElecAngleOffset;
-      /* 角度指令匀速递增 (17kHz 步进, 速度由 AngleDelta 控制) */
-      OpenLoop_IncAngle_Ref();
-  } else {
-      /* 速度/位置闭环: 编码器机械角 × 极对数 + 偏移补偿 → 电角度 Q15
-       * g_M2_ElecAngleOffset 校准: 对齐编码器零点与电机电气零点 */
-      g_M2_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc2_Angle * M2_POLE_PAIRS)
-                         + g_M2_ElecAngleOffset;
-  }
-
-  /* 电角速度估算: 用于逆Park延迟补偿 + dq解耦
-   * dpp = Q15 变化量 per ISR周期, int16_t 自然处理 65536 回绕 */
-  static int16_t m1_elec_prev = 0;
-  int16_t m1_speed_dpp = g_M1_ElecAngle_Q15 - m1_elec_prev;
-  m1_elec_prev = g_M1_ElecAngle_Q15;
-
-  static int16_t m2_elec_prev = 0;
-  int16_t m2_speed_dpp = g_M2_ElecAngle_Q15 - m2_elec_prev;
-  m2_elec_prev = g_M2_ElecAngle_Q15;
+  /* 电角速度估算: 逆Park延迟补偿 + dq解耦 (int16 自然回绕) */
+  static int16_t m1_elec_prev = 0, m2_elec_prev = 0;
+  int16_t m1_speed_dpp = CalcSpeedDpp(&m1_elec_prev, g_M1_ElecAngle_Q15);
+  int16_t m2_speed_dpp = CalcSpeedDpp(&m2_elec_prev, g_M2_ElecAngle_Q15);
 
   /* 全开环耗时0.8us  - */
 
@@ -312,38 +285,8 @@ void ADC1_2_IRQHandler(void)
 
   /* Park耗时0.8us  - */
 
-  /* ---- 电流环阶跃响应录制 (17kHz采集) ----
-   * Phase0: 阶跃施加到 d轴 (Id_ref = target, Iq_ref = 0)
-   * Phase1: 阶跃施加到 q轴 (Id_ref = 0, Iq_ref = target)
-   * 两轴由 while 自动衔接, while(1)开环Ref赋值已屏蔽 */
-  if (g_StepCapState == 1) {
-      uint16_t idx = g_StepCapIdx;
-
-      /* 第 STEP_CAP_PRE 个样本时施加阶跃 */
-      if (idx == STEP_CAP_PRE) {
-          int16_t target_q15 = MA_TO_Q15(g_StepCapTarget_mA);
-          if (g_StepCapPhase == 0) {
-              g_M2_Idq_Ref.d = target_q15;  /* d轴阶跃 */
-              g_M2_Idq_Ref.q = 0;
-          } else {
-              g_M2_Idq_Ref.d = 0;
-              g_M2_Idq_Ref.q = target_q15;  /* q轴阶跃 */
-          }
-      }
-
-      if (idx < STEP_CAP_DEPTH) {
-          g_StepCapBuf[idx].id_ref = g_M2_Idq_Ref.d;
-          g_StepCapBuf[idx].iq_ref = g_M2_Idq_Ref.q;
-          g_StepCapBuf[idx].id_fbk = g_M2_Idq.d;
-          g_StepCapBuf[idx].iq_fbk = g_M2_Idq.q;
-          g_StepCapIdx = idx + 1;
-      } else {
-          g_M2_Idq_Ref.d = 0;            /* 录完归零 */
-          g_M2_Idq_Ref.q = 0;
-          g_M2_Iq_Ref_mA = 0;
-          g_StepCapState = 2;             /* 录满, 等回放 */
-      }
-  }
+  /* 电流环阶跃响应录制 (state==1 时采集, 录满后 state→2 触发回放) */
+  StepCap_Record();
 
   /* ---- 电流闭环 ---- */
   /* M1: 校准时开环电压注入（跳过 PI），正常时 PI 闭环 */
@@ -355,8 +298,8 @@ void ADC1_2_IRQHandler(void)
       g_M1_Vdq.q = FOC_PI_Run(&g_M1_PI_q, g_M1_Idq_Ref.q, g_M1_Idq.q);
   }
   /* M2: 校准时开环电压注入（跳过 PI），正常时 PI 闭环 */
-  if (g_CalibVdDirectActive) {
-      g_M2_Vdq.d = g_CalibVdDirect;
+  if (g_CalibVdDirectActive_M2) {
+      g_M2_Vdq.d = g_CalibVdDirect_M2;
       g_M2_Vdq.q = 0;
   } else {
       g_M2_Vdq.d = FOC_PI_Run(&g_M2_PI_d, g_M2_Idq_Ref.d, g_M2_Idq.d);
@@ -365,41 +308,23 @@ void ADC1_2_IRQHandler(void)
 
   /* 电流闭环耗时2.3us  - */
 
-  /* M1 dq 前馈解耦 */
-  if (g_M1_CtrlMode != M2_MODE_OPEN_LOOP && g_M1_wLs_factor != 0) {
-      int32_t vd_ff = -(int32_t)m1_speed_dpp * (int32_t)g_M1_Idq.q;
-      int32_t vq_ff = +(int32_t)m1_speed_dpp * (int32_t)g_M1_Idq.d;
-      g_M1_Vdq.d = (int16_t)((int32_t)g_M1_Vdq.d + (int16_t)((vd_ff * (int32_t)g_M1_wLs_factor) >> 20));
-      g_M1_Vdq.q = (int16_t)((int32_t)g_M1_Vdq.q + (int16_t)((vq_ff * (int32_t)g_M1_wLs_factor) >> 20));
-  }
+  /* dq 前馈解耦 (开环自动跳过) */
+  FOC_DecoupleFF(&g_M1_Vdq, m1_speed_dpp, &g_M1_Idq, g_M1_wLs_factor, g_M1_CtrlMode);
+  FOC_DecoupleFF(&g_M2_Vdq, m2_speed_dpp, &g_M2_Idq, g_M2_wLs_factor, g_M2_CtrlMode);
 
-  /* M2 dq 前馈解耦 */
-  if (g_M2_CtrlMode != M2_MODE_OPEN_LOOP && g_M2_wLs_factor != 0) {
-      int32_t vd_ff = -(int32_t)m2_speed_dpp * (int32_t)g_M2_Idq.q;
-      int32_t vq_ff = +(int32_t)m2_speed_dpp * (int32_t)g_M2_Idq.d;
-      g_M2_Vdq.d = (int16_t)((int32_t)g_M2_Vdq.d + (int16_t)((vd_ff * (int32_t)g_M2_wLs_factor) >> 20));
-      g_M2_Vdq.q = (int16_t)((int32_t)g_M2_Vdq.q + (int16_t)((vq_ff * (int32_t)g_M2_wLs_factor) >> 20));
-  }
+  /* 电压圆饱和诊断 (限幅前检测, VOFA I9 报警) */
+  g_M1_VqSaturated = FOC_IsVqSaturated(&g_M1_Vdq);
+  g_M2_VqSaturated = FOC_IsVqSaturated(&g_M2_Vdq);
 
   /* 圆限幅: Vq²+Vd² ≤ MaxModule² (防逆变器过调制, 防逆Park int16溢出) */
   FOC_CircleLimitation(&g_M1_Vdq);
   FOC_CircleLimitation(&g_M2_Vdq);
 
-  /* Vq饱和标志: 圆限幅后的实际电压, 仅 Live Watch 诊断 */
-  {
-      int16_t vq1 = g_M1_Vdq.q;
-      g_M1_VqSaturated = (vq1 > (int16_t)VQ_SAT_THRESHOLD
-                       || vq1 < -(int16_t)VQ_SAT_THRESHOLD);
-      int16_t vq2 = g_M2_Vdq.q;
-      g_M2_VqSaturated = (vq2 > (int16_t)VQ_SAT_THRESHOLD
-                       || vq2 < -(int16_t)VQ_SAT_THRESHOLD);
-  }
-
   /* 电流环自校准: 累加 Vd/Id（TIM3 每 1ms 读平均并清零） */
-  if (g_CurrLoopCalibInProgress) {
-      g_CalibVdAcc += (int32_t)g_M2_Vdq.d;
-      g_CalibIdAcc += (int32_t)g_M2_Idq.d;
-      g_CalibAccCnt++;
+  if (g_CurrLoopCalibInProgress_M2) {
+      g_CalibVdAcc_M2 += (int32_t)g_M2_Vdq.d;
+      g_CalibIdAcc_M2 += (int32_t)g_M2_Idq.d;
+      g_CalibAccCnt_M2++;
   }
   if (g_CurrLoopCalibInProgress_M1) {
       g_CalibVdAcc_M1 += (int32_t)g_M1_Vdq.d;
@@ -409,22 +334,9 @@ void ADC1_2_IRQHandler(void)
 
   /* 未触发耗时0.5us  - */
 
-  /* M1 逆Park: 补偿 ADC采样→PWM更新 的延迟 (~1个PWM周期), 与M2对称 */
-  {
-      int16_t m1_inv_angle = g_M1_ElecAngle_Q15 + m1_speed_dpp;
-      SinCos_Q15_t sc_m1_inv;
-      FOC_CalcSinCos(m1_inv_angle, &sc_m1_inv);
-      FOC_InvParkTransform(&sc_m1_inv, &g_M1_Vdq, &g_M1_Vab);
-  }
-
-  /* M2 逆Park: 补偿 ADC采样→PWM更新 的延迟 (~1个PWM周期)
-   * 50极对@500RPM: 补偿 ~1607 Q15 ≈ 8.8° 电角度, 提升高速力矩 */
-  {
-      int16_t m2_inv_angle = g_M2_ElecAngle_Q15 + m2_speed_dpp;
-      SinCos_Q15_t sc_m2_inv;
-      FOC_CalcSinCos(m2_inv_angle, &sc_m2_inv);
-      FOC_InvParkTransform(&sc_m2_inv, &g_M2_Vdq, &g_M2_Vab);
-  }
+  /* 逆Park + 延迟补偿: 电角度前推 1 个 ISR 周期补偿 ADC→PWM 延迟 */
+  FOC_InvParkWithComp(g_M1_ElecAngle_Q15, m1_speed_dpp, &g_M1_Vdq, &g_M1_Vab);
+  FOC_InvParkWithComp(g_M2_ElecAngle_Q15, m2_speed_dpp, &g_M2_Vdq, &g_M2_Vab);
 
   /* 逆Park变换 耗时0.8us  - */
 
@@ -440,215 +352,6 @@ void ADC1_2_IRQHandler(void)
   LL_ADC_ClearFlag_JEOS(ADC3);
   LED_OFF;
   /* USER CODE END ADC1_2_IRQn 1 */
-}
-
-/* ================================================================
- * M1 控制环 (TIM3 1kHz 调用, 与 M2 镜像结构)
- * 输入: g_Enc1_SpeedFilt, g_M1_PosFbk, d1 (编码器增量)
- * 输出: g_M1_Idq_Ref
- * ================================================================ */
-static void M1_ControlLoop(int16_t d1)
-{
-    /* ---- Id 三级自适应 ---- */
-    {
-        static int16_t id_still_cnt = 0;
-        static uint8_t id_in_boost  = 0;
-        int16_t id_eff;
-        int16_t abs_spd = g_Enc1_SpeedFilt;
-        if (abs_spd < 0) abs_spd = -abs_spd;
-        int16_t abs_d = d1;
-        if (abs_d < 0) abs_d = -abs_d;
-
-        if (abs_spd < 5 && abs_d <= g_M1_Id_StillDeltaMax) {
-            if (id_still_cnt < g_M1_Id_StandbyDelay_ms)
-                id_still_cnt++;
-            id_eff = (id_still_cnt >= g_M1_Id_StandbyDelay_ms)
-                     ? g_M1_Id_Standby_mA : g_M1_Id_Hold_mA;
-        } else {
-            id_still_cnt = 0;
-            id_eff = g_M1_Id_Hold_mA;
-        }
-
-        if (g_M1_CtrlMode == M2_MODE_STEP_ANGLE
-         || g_M1_CtrlMode == M2_MODE_POSITION) {
-            int32_t abs_err = g_M1_StepAngle_Err;
-            if (g_M1_CtrlMode == M2_MODE_POSITION)
-                abs_err = g_M1_PosCmd - g_M1_PosFbk;
-            if (abs_err < 0) abs_err = -abs_err;
-
-            if (!id_in_boost && abs_err > (int32_t)g_M1_Id_BoostEnter)
-                id_in_boost = 1;
-            else if (id_in_boost && abs_err < (int32_t)g_M1_Id_BoostExit)
-                id_in_boost = 0;
-
-            if (id_in_boost) {
-                id_eff = g_M1_Id_Boost_mA;
-                id_still_cnt = 0;
-            }
-        } else {
-            id_in_boost = 0;
-        }
-        g_M1_Id_Eff_mA = id_eff;
-    }
-
-    /* ---- 位置环 外环: PI → 速度参考 (PI-P 结构) ---- */
-    static uint8_t m1_pos_was_active = 0;
-    float m1_pos_spd_ref = 0.0f;
-
-    if (g_M1_CtrlMode == M2_MODE_POSITION) {
-        if (!m1_pos_was_active) {
-            g_M1_PosCmd = g_M1_PosFbk;
-            g_M1_PosPID.integral = 0.0f;
-            m1_pos_was_active = 1;
-        }
-        int32_t pos_err = g_M1_PosCmd - g_M1_PosFbk;
-        if (pos_err >  30000) pos_err =  30000;
-        if (pos_err < -30000) pos_err = -30000;
-
-        float p_out = g_M1_PosPID.kp * (float)pos_err;
-        float i_out = g_M1_PosPID.integral;
-        if (g_M1_PosPID.ki != 0.0f) {
-            if ((i_out > 0.0f && pos_err < 0) ||
-                (i_out < 0.0f && pos_err > 0))
-                i_out = 0.0f;
-            i_out += g_M1_PosPID.ki * (float)pos_err;
-            if (i_out >  g_M1_PosPID.integ_limit) i_out =  g_M1_PosPID.integ_limit;
-            if (i_out < -g_M1_PosPID.integ_limit) i_out = -g_M1_PosPID.integ_limit;
-        }
-        m1_pos_spd_ref = p_out + i_out;
-        if (m1_pos_spd_ref > g_M1_PosPID.out_limit) {
-            i_out -= (m1_pos_spd_ref - g_M1_PosPID.out_limit);
-            m1_pos_spd_ref = g_M1_PosPID.out_limit;
-        } else if (m1_pos_spd_ref < -g_M1_PosPID.out_limit) {
-            i_out -= (m1_pos_spd_ref + g_M1_PosPID.out_limit);
-            m1_pos_spd_ref = -g_M1_PosPID.out_limit;
-        }
-        g_M1_PosPID.integral = i_out;
-        g_M1_PosPID.output = m1_pos_spd_ref;
-        g_Dbg_M1_Pos_iqmA  = m1_pos_spd_ref;
-        g_Dbg_M1_Pos_pTerm = (float)pos_err;
-    } else {
-        if (m1_pos_was_active) g_M1_PosPID.integral = 0.0f;
-        m1_pos_was_active = 0;
-    }
-
-    /* ---- 步距角闭环: 直接 PD→Iq ---- */
-    static uint8_t m1_step_was_active = 0;
-
-    if (g_M1_CtrlMode == M2_MODE_STEP_ANGLE) {
-        if (!m1_step_was_active) {
-            g_M1_StepAngle_Ref = g_M1_PosFbk;
-            g_M1_StepAnglePD.integral = 0.0f;
-            g_M1_PI_d.integral = 0;
-            g_M1_PI_q.integral = 0;
-            g_M1_AngleDelta = 0;
-            m1_step_was_active = 1;
-        }
-        int32_t pos_err = g_M1_StepAngle_Ref - g_M1_PosFbk;
-        if (pos_err >  30000) pos_err =  30000;
-        if (pos_err < -30000) pos_err = -30000;
-        g_M1_StepAngle_Err = pos_err;
-
-        float p_term = g_M1_StepAnglePD.kp * (float)pos_err;
-        float d_term = g_M1_StepAnglePD.kd
-                     * ((float)g_Enc1_SpeedFilt - (float)g_M1_RPM_Cmd);
-
-        float i_term = g_M1_StepAnglePD.integral;
-        if (g_M1_StepAnglePD.ki != 0.0f) {
-            if ((i_term > 0.0f && pos_err < 0) ||
-                (i_term < 0.0f && pos_err > 0))
-                i_term = 0.0f;
-            i_term += g_M1_StepAnglePD.ki * (float)pos_err;
-            if (i_term >  g_M1_StepAnglePD.integ_limit) i_term =  g_M1_StepAnglePD.integ_limit;
-            if (i_term < -g_M1_StepAnglePD.integ_limit) i_term = -g_M1_StepAnglePD.integ_limit;
-        } else {
-            i_term = 0.0f;
-        }
-
-        float iq_mA = p_term - d_term + i_term;
-        if (iq_mA > g_M1_StepAnglePD.out_limit) {
-            i_term -= (iq_mA - g_M1_StepAnglePD.out_limit);
-            iq_mA = g_M1_StepAnglePD.out_limit;
-        } else if (iq_mA < -g_M1_StepAnglePD.out_limit) {
-            i_term -= (iq_mA + g_M1_StepAnglePD.out_limit);
-            iq_mA = -g_M1_StepAnglePD.out_limit;
-        }
-        g_M1_StepAnglePD.integral = i_term;
-        g_M1_StepAnglePD.output   = iq_mA;
-
-        g_Dbg_M1_Spd_RpmCmd = (float)(g_M1_StepAngle_Ref / 65536);
-        g_Dbg_M1_Spd_Err    = (float)pos_err;
-        g_Dbg_M1_Spd_IqOut  = iq_mA;
-
-        __disable_irq();
-        g_M1_Idq_Ref.d = MA_TO_Q15(g_M1_Id_Eff_mA);
-        g_M1_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
-        __enable_irq();
-    } else {
-        m1_step_was_active = 0;
-    }
-
-    /* ---- 速度闭环 PI (速度模式PI / 位置模式P-only内环) ---- */
-    static uint8_t m1_spd_was_active = 0;
-    static int16_t m1_rpm_cmd_ramped = 0;
-
-    if (g_M1_CtrlMode == M2_MODE_SPEED
-     || g_M1_CtrlMode == M2_MODE_POSITION) {
-
-        if (!m1_spd_was_active) {
-            g_M1_SpeedPI.integral = 0.0f;
-            g_M1_PI_d.integral = 0;
-            g_M1_PI_q.integral = 0;
-            m1_rpm_cmd_ramped = (int16_t)g_Enc1_SpeedFilt;
-            m1_spd_was_active = 1;
-        }
-
-        float rpm_target;
-        if (g_M1_CtrlMode == M2_MODE_POSITION) {
-            rpm_target = m1_pos_spd_ref;
-        } else {
-            int16_t target = g_M1_RPM_Cmd;
-            int16_t ramp   = g_M1_RpmRampRate;
-            if (ramp < 1) ramp = 1;
-            if (m1_rpm_cmd_ramped < target) {
-                m1_rpm_cmd_ramped += ramp;
-                if (m1_rpm_cmd_ramped > target) m1_rpm_cmd_ramped = target;
-            } else if (m1_rpm_cmd_ramped > target) {
-                m1_rpm_cmd_ramped -= ramp;
-                if (m1_rpm_cmd_ramped < target) m1_rpm_cmd_ramped = target;
-            }
-            rpm_target = (float)m1_rpm_cmd_ramped;
-            g_Dbg_M1_Spd_RpmCmd = rpm_target;
-        }
-
-        float iq_mA;
-        if (g_M1_CtrlMode == M2_MODE_SPEED) {
-            iq_mA = SpeedPI_Run(&g_M1_SpeedPI, rpm_target,
-                                (float)g_Enc1_SpeedFilt);
-        } else {
-            float spd_err = rpm_target - (float)g_Enc1_SpeedFilt;
-            iq_mA = g_M1_SpeedPI.kp * spd_err;
-            if (iq_mA >  g_M1_SpeedPI.out_limit) iq_mA =  g_M1_SpeedPI.out_limit;
-            if (iq_mA < -g_M1_SpeedPI.out_limit) iq_mA = -g_M1_SpeedPI.out_limit;
-            g_M1_SpeedPI.integral = 0.0f;
-            g_M1_SpeedPI.output   = iq_mA;
-        }
-
-        if (g_M1_CtrlMode == M2_MODE_SPEED) {
-            g_Dbg_M1_Spd_Err = rpm_target - (float)g_Enc1_SpeedFilt;
-        } else {
-            g_Dbg_M1_Pos_dTerm = iq_mA;
-        }
-        g_Dbg_M1_Spd_IqOut = iq_mA;
-
-        __disable_irq();
-        g_M1_Idq_Ref.d = MA_TO_Q15(g_M1_Id_Eff_mA);
-        g_M1_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
-        __enable_irq();
-    } else if (g_M1_CtrlMode != M2_MODE_STEP_ANGLE) {
-        m1_spd_was_active = 0;
-        m1_rpm_cmd_ramped = 0;
-    }
 }
 
 /**
@@ -667,7 +370,6 @@ void TIM3_IRQHandler(void)
   static uint16_t enc1_prev = 0, enc2_prev = 0;
   static int32_t  filt_acc1 = 0, filt_acc2 = 0;
   static uint8_t  calib_was_active = 0;
-  static uint8_t  spd_was_active   = 0;
 
   /* KTH71 校准期间: 暂停速度计算 (VOFA 由 TIM4 vofa_engine 自动处理) */
   if (g_Kth71CalibActive) {
@@ -686,7 +388,7 @@ void TIM3_IRQHandler(void)
   }
 
   /* ---- 速度计算: Δangle × 60000 >> 16 → RPM ---- */
-  int16_t d1 = (int16_t)(g_Enc1_Angle - enc1_prev);
+  int16_t d1 = (int16_t)(g_Enc1_Angle - enc1_prev) * M1_ENC_DIR;
   int16_t d2 = (int16_t)(g_Enc2_Angle - enc2_prev);
   enc1_prev = g_Enc1_Angle;
   enc2_prev = g_Enc2_Angle;
@@ -713,253 +415,9 @@ void TIM3_IRQHandler(void)
   g_M1_PosFbk += (int32_t)d1;
   g_M2_PosFbk += (int32_t)d2;
 
-  /* ---- M1 控制环 ---- */
+  /* ---- M1 / M2 控制环 (Id自适应 + 位置PI + 步距角PD + 速度PI) ---- */
   M1_ControlLoop(d1);
-
-  /* ---- Id 三级自适应 (Standby / Hold / Boost + 迟滞) ----
-   * Standby(25mA): |speed|<5 且 |Δenc|≤阈值 持续 N ms
-   * Hold(50mA):    正常运行
-   * Boost(100mA):  |pos_err| > BoostEnter, 退出需 < BoostExit (迟滞防抖振)
-   * 优先级: Boost > Hold > Standby */
-  {
-      static int16_t id_still_cnt = 0;            /* 静止计时 ms */
-      static uint8_t id_in_boost  = 0;            /* Boost 迟滞状态 */
-      int16_t id_eff;                             /* 本拍有效Id (mA) */
-      int16_t abs_spd = g_Enc2_SpeedFilt;
-      if (abs_spd < 0) abs_spd = -abs_spd;
-      int16_t abs_d = d2;
-      if (abs_d < 0) abs_d = -abs_d;
-
-      /* 第1层: Standby / Hold 基础判定 (timer-based) */
-      if (abs_spd < 5 && abs_d <= g_M2_Id_StillDeltaMax) {
-          if (id_still_cnt < g_M2_Id_StandbyDelay_ms)
-              id_still_cnt++;
-          id_eff = (id_still_cnt >= g_M2_Id_StandbyDelay_ms)
-                   ? g_M2_Id_Standby_mA : g_M2_Id_Hold_mA;
-      } else {
-          id_still_cnt = 0;
-          id_eff = g_M2_Id_Hold_mA;
-      }
-
-      /* 第2层: Boost 覆盖 — 位置误差大时增强磁刚度 (仅步距角/位置模式)
-       * 迟滞: 进入 > BoostEnter, 退出 < BoostExit, 避免阈值边界抖振 */
-      if (g_M2_CtrlMode == M2_MODE_STEP_ANGLE
-       || g_M2_CtrlMode == M2_MODE_POSITION) {
-          int32_t abs_err = g_M2_StepAngle_Err;
-          if (g_M2_CtrlMode == M2_MODE_POSITION)
-              abs_err = g_M2_PosCmd - g_M2_PosFbk;
-          if (abs_err < 0) abs_err = -abs_err;
-
-          if (!id_in_boost && abs_err > (int32_t)g_M2_Id_BoostEnter) {
-              id_in_boost = 1;                  /* 进入 Boost */
-          } else if (id_in_boost && abs_err < (int32_t)g_M2_Id_BoostExit) {
-              id_in_boost = 0;                  /* 退出 Boost */
-          }
-
-          if (id_in_boost) {
-              id_eff = g_M2_Id_Boost_mA;
-              id_still_cnt = 0;                 /* Boost 中重置静止计时 */
-          }
-      } else {
-          id_in_boost = 0;                      /* 非位置模式清除 Boost */
-      }
-
-      g_M2_Id_Eff_mA = id_eff;
-  }
-
-  /* ---- M2 位置环 外环: 位置PI → 速度参考 (PI-P 结构) ----
-   * PI-P 级联: 位置PI(外环) → 速度P-only(内环) → Iq(mA)
-   *   P: 比例 → 快速响应大偏差
-   *   I: 积分 → 缓慢爬升克服摩擦/齿槽力矩死区
-   * out_limit = velocity_limit: 限制最大移动速度 */
-  static uint8_t pos_was_active = 0;
-  float pos_spd_ref = 0.0f;              /* 位置外环输出: 速度参考 RPM */
-
-  if (g_M2_CtrlMode == M2_MODE_POSITION) {
-      /* 首次进入: 锁定当前位置, 清积分 */
-      if (!pos_was_active) {
-          g_M2_PosCmd = g_M2_PosFbk;
-          g_M2_PosPID.integral = 0.0f;
-          pos_was_active = 1;
-      }
-
-      int32_t pos_err = g_M2_PosCmd - g_M2_PosFbk;
-      #define M2_POS_ERR_MAX  30000
-      if (pos_err >  M2_POS_ERR_MAX) pos_err =  M2_POS_ERR_MAX;
-      if (pos_err < -M2_POS_ERR_MAX) pos_err = -M2_POS_ERR_MAX;
-
-      /* P 项: 快速响应 */
-      float p_out = g_M2_PosPID.kp * (float)pos_err;
-
-      /* I 项: 克服摩擦死区, 过零清积分防过冲 */
-      float i_out = g_M2_PosPID.integral;
-      if (g_M2_PosPID.ki != 0.0f) {
-          /* 过零检测: 积分方向与误差方向相反 → 已过冲, 清积分 */
-          if ((i_out > 0.0f && pos_err < 0) ||
-              (i_out < 0.0f && pos_err > 0)) {
-              i_out = 0.0f;
-          }
-          i_out += g_M2_PosPID.ki * (float)pos_err;
-          if (i_out >  g_M2_PosPID.integ_limit) i_out =  g_M2_PosPID.integ_limit;
-          if (i_out < -g_M2_PosPID.integ_limit) i_out = -g_M2_PosPID.integ_limit;
-      }
-
-      pos_spd_ref = p_out + i_out;
-
-      /* velocity_limit + anti-windup */
-      if (pos_spd_ref > g_M2_PosPID.out_limit) {
-          i_out -= (pos_spd_ref - g_M2_PosPID.out_limit);
-          pos_spd_ref = g_M2_PosPID.out_limit;
-      } else if (pos_spd_ref < -g_M2_PosPID.out_limit) {
-          i_out -= (pos_spd_ref + g_M2_PosPID.out_limit);
-          pos_spd_ref = -g_M2_PosPID.out_limit;
-      }
-      g_M2_PosPID.integral = i_out;
-      g_M2_PosPID.output = pos_spd_ref;
-
-      /* VOFA 调试 */
-      g_Dbg_Pos_iqmA  = pos_spd_ref;     /* 外环输出: 速度参考 RPM */
-      g_Dbg_Pos_pTerm = (float)pos_err;   /* 位置误差 counts */
-  } else {
-      if (pos_was_active) g_M2_PosPID.integral = 0.0f;
-      pos_was_active = 0;
-  }
-
-  /* ---- M2 步距角闭环: 直接 PD→Iq (高带宽, 丝滑归位) ----
-   * 不走速度PI: 位置误差×kp→弹簧力, 速度误差×kd→阻尼, 直出电流
-   * 带宽高于级联架构, 归位无过冲, 代价是高速运转噪声略大 */
-  static uint8_t step_was_active = 0;
-
-  if (g_M2_CtrlMode == M2_MODE_STEP_ANGLE) {
-      if (!step_was_active) {
-          g_M2_StepAngle_Ref = g_M2_PosFbk;
-          g_M2_StepAnglePD.integral = 0.0f;
-          g_M2_PI_d.integral = 0;
-          g_M2_PI_q.integral = 0;
-          g_M2_AngleDelta = 0;
-          step_was_active = 1;
-      }
-
-      int32_t pos_err = g_M2_StepAngle_Ref - g_M2_PosFbk;
-      #define STEP_POS_ERR_MAX  30000
-      if (pos_err >  STEP_POS_ERR_MAX) pos_err =  STEP_POS_ERR_MAX;
-      if (pos_err < -STEP_POS_ERR_MAX) pos_err = -STEP_POS_ERR_MAX;
-      g_M2_StepAngle_Err = pos_err;
-
-      /* P: 位置误差 → 弹簧力 (mA/count) */
-      float p_term = g_M2_StepAnglePD.kp * (float)pos_err;
-
-      /* D: 速度误差 → 阻尼 (mA/RPM), 用 (speed - RPM_Cmd) 防匀速拖拽 */
-      float d_term = g_M2_StepAnglePD.kd
-                   * ((float)g_Enc2_SpeedFilt - (float)g_M2_RPM_Cmd);
-
-      /* I: ki≠0 时累积, 消除稳态残差, 过零清积分防过冲 */
-      float i_term = g_M2_StepAnglePD.integral;
-      if (g_M2_StepAnglePD.ki != 0.0f) {
-          /* 过零检测: 积分方向与误差方向相反 → 已过冲, 清积分 */
-          if ((i_term > 0.0f && pos_err < 0) ||
-              (i_term < 0.0f && pos_err > 0)) {
-              i_term = 0.0f;
-          }
-          i_term += g_M2_StepAnglePD.ki * (float)pos_err;
-          if (i_term >  g_M2_StepAnglePD.integ_limit) i_term =  g_M2_StepAnglePD.integ_limit;
-          if (i_term < -g_M2_StepAnglePD.integ_limit) i_term = -g_M2_StepAnglePD.integ_limit;
-      } else {
-          i_term = 0.0f;
-      }
-
-      float iq_mA = p_term - d_term + i_term;
-
-      /* anti-windup + 输出限幅 */
-      if (iq_mA > g_M2_StepAnglePD.out_limit) {
-          i_term -= (iq_mA - g_M2_StepAnglePD.out_limit);
-          iq_mA = g_M2_StepAnglePD.out_limit;
-      } else if (iq_mA < -g_M2_StepAnglePD.out_limit) {
-          i_term -= (iq_mA + g_M2_StepAnglePD.out_limit);
-          iq_mA = -g_M2_StepAnglePD.out_limit;
-      }
-      g_M2_StepAnglePD.integral = i_term;
-      g_M2_StepAnglePD.output   = iq_mA;
-
-      /* VOFA */
-      g_Dbg_Spd_RpmCmd = (float)(g_M2_StepAngle_Ref / 65536);
-      g_Dbg_Spd_Err    = (float)pos_err;
-      g_Dbg_Spd_IqOut  = iq_mA;
-
-      __disable_irq();
-      g_M2_Idq_Ref.d = MA_TO_Q15(g_M2_Id_Eff_mA);
-      g_M2_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
-      __enable_irq();
-  } else {
-      step_was_active = 0;
-  }
-
-  /* ---- M2 速度闭环 PI (速度模式PI / 位置模式P-only内环) ---- */
-  static int16_t rpm_cmd_ramped = 0;
-
-  if (g_M2_CtrlMode == M2_MODE_SPEED
-   || g_M2_CtrlMode == M2_MODE_POSITION) {
-
-      if (!spd_was_active) {
-          g_M2_SpeedPI.integral = 0.0f;
-          g_M2_PI_d.integral = 0;
-          g_M2_PI_q.integral = 0;
-          rpm_cmd_ramped = (int16_t)g_Enc2_SpeedFilt;
-          spd_was_active = 1;
-      }
-
-      float rpm_target;
-      if (g_M2_CtrlMode == M2_MODE_POSITION) {
-          rpm_target = pos_spd_ref;           /* 位置外环 → 速度参考 */
-      } else {
-          /* 速度模式: 斜坡限速 */
-          int16_t target = g_M2_RPM_Cmd;
-          int16_t ramp   = g_M2_RpmRampRate;
-          if (ramp < 1) ramp = 1;
-          if (rpm_cmd_ramped < target) {
-              rpm_cmd_ramped += ramp;
-              if (rpm_cmd_ramped > target) rpm_cmd_ramped = target;
-          } else if (rpm_cmd_ramped > target) {
-              rpm_cmd_ramped -= ramp;
-              if (rpm_cmd_ramped < target) rpm_cmd_ramped = target;
-          }
-          rpm_target = (float)rpm_cmd_ramped;
-          g_Dbg_Spd_RpmCmd = rpm_target;
-      }
-
-      /* 内环: 速度模式PI, 位置模式P-only (PI-P结构, 无积分过冲) */
-      float iq_mA;
-      if (g_M2_CtrlMode == M2_MODE_SPEED) {
-          iq_mA = SpeedPI_Run(&g_M2_SpeedPI,
-                              rpm_target,
-                              (float)g_Enc2_SpeedFilt);
-      } else {
-          float spd_err = rpm_target - (float)g_Enc2_SpeedFilt;
-          iq_mA = g_M2_SpeedPI.kp * spd_err;
-          if (iq_mA >  g_M2_SpeedPI.out_limit) iq_mA =  g_M2_SpeedPI.out_limit;
-          if (iq_mA < -g_M2_SpeedPI.out_limit) iq_mA = -g_M2_SpeedPI.out_limit;
-          g_M2_SpeedPI.integral = 0.0f;
-          g_M2_SpeedPI.output   = iq_mA;
-      }
-
-      if (g_M2_CtrlMode == M2_MODE_SPEED) {
-          g_Dbg_Spd_Err = rpm_target - (float)g_Enc2_SpeedFilt;
-      } else {
-          g_Dbg_Pos_dTerm = iq_mA;
-      }
-      g_Dbg_Spd_IqOut = iq_mA;
-
-      /* 原子写入 Idq_Ref */
-      __disable_irq();
-      g_M2_Idq_Ref.d = MA_TO_Q15(g_M2_Id_Eff_mA);
-      g_M2_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
-      __enable_irq();
-  } else {
-      spd_was_active = 0;
-      rpm_cmd_ramped = 0;
-  }
-
-  /* VOFA 发送已移至 TIM4 vofa_engine, TIM3 不再管理 */
+  M2_ControlLoop(d2);
   /* USER CODE END TIM3_IRQn 0 */
   /* USER CODE BEGIN TIM3_IRQn 1 */
 
@@ -1016,5 +474,520 @@ void HRTIM1_FLT_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/* ================================================================
+ * M1 控制环 (TIM3 1kHz 调用, 与 M2 镜像结构)
+ * 输入: g_Enc1_SpeedFilt, g_M1_PosFbk, d1 (编码器增量)
+ * 输出: g_M1_Idq_Ref
+ * ================================================================ */
+static void M1_ControlLoop(int16_t d1)
+{
+    /* ---- Id 三级自适应 ---- */
+    {
+        static int16_t id_still_cnt = 0;
+        static uint8_t id_in_boost  = 0;
+        int16_t id_eff;
+        int16_t abs_spd = g_Enc1_SpeedFilt;
+        if (abs_spd < 0) abs_spd = -abs_spd;
+        int16_t abs_d = d1;
+        if (abs_d < 0) abs_d = -abs_d;
+
+        if (abs_spd < 5 && abs_d <= g_M1_Id_StillDeltaMax) {
+            if (id_still_cnt < g_M1_Id_StandbyDelay_ms)
+                id_still_cnt++;
+            id_eff = (id_still_cnt >= g_M1_Id_StandbyDelay_ms)
+                     ? g_M1_Id_Standby_mA : g_M1_Id_Hold_mA;
+        } else {
+            id_still_cnt = 0;
+            id_eff = g_M1_Id_Hold_mA;
+        }
+
+        if (g_M1_CtrlMode == MODE_STEP_ANGLE
+         || g_M1_CtrlMode == MODE_POSITION) {
+            int32_t abs_err = g_M1_StepAngle_Err;
+            if (g_M1_CtrlMode == MODE_POSITION)
+                abs_err = g_M1_PosCmd - g_M1_PosFbk;
+            if (abs_err < 0) abs_err = -abs_err;
+
+            if (!id_in_boost && abs_err > (int32_t)g_M1_Id_BoostEnter)
+                id_in_boost = 1;
+            else if (id_in_boost && abs_err < (int32_t)g_M1_Id_BoostExit)
+                id_in_boost = 0;
+
+            if (id_in_boost) {
+                id_eff = g_M1_Id_Boost_mA;
+                id_still_cnt = 0;
+            }
+        } else {
+            id_in_boost = 0;
+        }
+        g_M1_Id_Eff_mA = id_eff;
+    }
+
+    /* ---- 位置环 外环: PI → 速度参考 (PI-P 结构) ---- */
+    static uint8_t m1_pos_was_active = 0;
+    float m1_pos_spd_ref = 0.0f;
+
+    if (g_M1_CtrlMode == MODE_POSITION) {
+        if (!m1_pos_was_active) {
+            g_M1_PosCmd = g_M1_PosFbk;
+            g_M1_PosPID.integral = 0.0f;
+            m1_pos_was_active = 1;
+        }
+        int32_t pos_err = g_M1_PosCmd - g_M1_PosFbk;
+        if (pos_err >  30000) pos_err =  30000;
+        if (pos_err < -30000) pos_err = -30000;
+
+        float p_out = g_M1_PosPID.kp * (float)pos_err;
+        float i_out = g_M1_PosPID.integral;
+        if (g_M1_PosPID.ki != 0.0f) {
+            if ((i_out > 0.0f && pos_err < 0) ||
+                (i_out < 0.0f && pos_err > 0))
+                i_out = 0.0f;
+            i_out += g_M1_PosPID.ki * (float)pos_err;
+            if (i_out >  g_M1_PosPID.integ_limit) i_out =  g_M1_PosPID.integ_limit;
+            if (i_out < -g_M1_PosPID.integ_limit) i_out = -g_M1_PosPID.integ_limit;
+        }
+        m1_pos_spd_ref = p_out + i_out;
+        if (m1_pos_spd_ref > g_M1_PosPID.out_limit) {
+            i_out -= (m1_pos_spd_ref - g_M1_PosPID.out_limit);
+            m1_pos_spd_ref = g_M1_PosPID.out_limit;
+        } else if (m1_pos_spd_ref < -g_M1_PosPID.out_limit) {
+            i_out -= (m1_pos_spd_ref + g_M1_PosPID.out_limit);
+            m1_pos_spd_ref = -g_M1_PosPID.out_limit;
+        }
+        g_M1_PosPID.integral = i_out;
+        g_M1_PosPID.output = m1_pos_spd_ref;
+        g_Dbg_M1_Pos_iqmA  = m1_pos_spd_ref;
+        g_Dbg_M1_Pos_pTerm = (float)pos_err;
+    } else {
+        if (m1_pos_was_active) g_M1_PosPID.integral = 0.0f;
+        m1_pos_was_active = 0;
+    }
+
+    /* ---- 步距角闭环: 直接 PD→Iq ---- */
+    static uint8_t m1_step_was_active = 0;
+
+    if (g_M1_CtrlMode == MODE_STEP_ANGLE) {
+        if (!m1_step_was_active) {
+            g_M1_StepAngle_Ref = g_M1_PosFbk;
+            g_M1_StepAnglePD.integral = 0.0f;
+            g_M1_PI_d.integral = 0;
+            g_M1_PI_q.integral = 0;
+            g_M1_AngleDelta = 0;
+            m1_step_was_active = 1;
+        }
+        int32_t pos_err = g_M1_StepAngle_Ref - g_M1_PosFbk;
+        if (pos_err >  30000) pos_err =  30000;
+        if (pos_err < -30000) pos_err = -30000;
+        g_M1_StepAngle_Err = pos_err;
+
+        float p_term = g_M1_StepAnglePD.kp * (float)pos_err;
+        float d_term = g_M1_StepAnglePD.kd
+                     * ((float)g_Enc1_SpeedFilt - (float)g_M1_RPM_Cmd);
+
+        float i_term = g_M1_StepAnglePD.integral;
+        if (g_M1_StepAnglePD.ki != 0.0f) {
+            if ((i_term > 0.0f && pos_err < 0) ||
+                (i_term < 0.0f && pos_err > 0))
+                i_term = 0.0f;
+            i_term += g_M1_StepAnglePD.ki * (float)pos_err;
+            if (i_term >  g_M1_StepAnglePD.integ_limit) i_term =  g_M1_StepAnglePD.integ_limit;
+            if (i_term < -g_M1_StepAnglePD.integ_limit) i_term = -g_M1_StepAnglePD.integ_limit;
+        } else {
+            i_term = 0.0f;
+        }
+
+        float iq_mA = p_term - d_term + i_term;
+        if (iq_mA > g_M1_StepAnglePD.out_limit) {
+            i_term -= (iq_mA - g_M1_StepAnglePD.out_limit);
+            iq_mA = g_M1_StepAnglePD.out_limit;
+        } else if (iq_mA < -g_M1_StepAnglePD.out_limit) {
+            i_term -= (iq_mA + g_M1_StepAnglePD.out_limit);
+            iq_mA = -g_M1_StepAnglePD.out_limit;
+        }
+        g_M1_StepAnglePD.integral = i_term;
+        g_M1_StepAnglePD.output   = iq_mA;
+
+        g_Dbg_M1_Spd_RpmCmd = (float)(g_M1_StepAngle_Ref / 65536);
+        g_Dbg_M1_Spd_Err    = (float)pos_err;
+        g_Dbg_M1_Spd_IqOut  = iq_mA;
+
+        __disable_irq();
+        g_M1_Idq_Ref.d = MA_TO_Q15(g_M1_Id_Eff_mA);
+        g_M1_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
+        __enable_irq();
+    } else {
+        m1_step_was_active = 0;
+    }
+
+    /* ---- 速度闭环 PI (速度模式PI / 位置模式P-only内环) ---- */
+    static uint8_t m1_spd_was_active = 0;
+    static int16_t m1_rpm_cmd_ramped = 0;
+
+    if (g_M1_CtrlMode == MODE_SPEED
+     || g_M1_CtrlMode == MODE_POSITION) {
+
+        if (!m1_spd_was_active) {
+            g_M1_SpeedPI.integral = 0.0f;
+            g_M1_PI_d.integral = 0;
+            g_M1_PI_q.integral = 0;
+            m1_rpm_cmd_ramped = (int16_t)g_Enc1_SpeedFilt;
+            m1_spd_was_active = 1;
+        }
+
+        float rpm_target;
+        if (g_M1_CtrlMode == MODE_POSITION) {
+            rpm_target = m1_pos_spd_ref;
+        } else {
+            int16_t target = g_M1_RPM_Cmd;
+            int16_t ramp   = g_M1_RpmRampRate;
+            if (ramp < 1) ramp = 1;
+            if (m1_rpm_cmd_ramped < target) {
+                m1_rpm_cmd_ramped += ramp;
+                if (m1_rpm_cmd_ramped > target) m1_rpm_cmd_ramped = target;
+            } else if (m1_rpm_cmd_ramped > target) {
+                m1_rpm_cmd_ramped -= ramp;
+                if (m1_rpm_cmd_ramped < target) m1_rpm_cmd_ramped = target;
+            }
+            rpm_target = (float)m1_rpm_cmd_ramped;
+            g_Dbg_M1_Spd_RpmCmd = rpm_target;
+        }
+
+        float iq_mA;
+        if (g_M1_CtrlMode == MODE_SPEED) {
+            iq_mA = SpeedPI_Run(&g_M1_SpeedPI, rpm_target,
+                                (float)g_Enc1_SpeedFilt);
+        } else {
+            float spd_err = rpm_target - (float)g_Enc1_SpeedFilt;
+            iq_mA = g_M1_SpeedPI.kp * spd_err;
+            if (iq_mA >  g_M1_SpeedPI.out_limit) iq_mA =  g_M1_SpeedPI.out_limit;
+            if (iq_mA < -g_M1_SpeedPI.out_limit) iq_mA = -g_M1_SpeedPI.out_limit;
+            g_M1_SpeedPI.integral = 0.0f;
+            g_M1_SpeedPI.output   = iq_mA;
+        }
+
+        if (g_M1_CtrlMode == MODE_SPEED) {
+            g_Dbg_M1_Spd_Err = rpm_target - (float)g_Enc1_SpeedFilt;
+        } else {
+            g_Dbg_M1_Pos_dTerm = iq_mA;
+        }
+        g_Dbg_M1_Spd_IqOut = iq_mA;
+
+        __disable_irq();
+        g_M1_Idq_Ref.d = MA_TO_Q15(g_M1_Id_Eff_mA);
+        g_M1_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
+        __enable_irq();
+    } else if (g_M1_CtrlMode != MODE_STEP_ANGLE) {
+        m1_spd_was_active = 0;
+        m1_rpm_cmd_ramped = 0;
+    }
+}
+
+/* ================================================================
+ * M2 控制环 (TIM3 1kHz 调用, 与 M1 镜像结构)
+ * 输入: g_Enc2_SpeedFilt, g_M2_PosFbk, d2 (编码器增量)
+ * 输出: g_M2_Idq_Ref
+ * ================================================================ */
+static void M2_ControlLoop(int16_t d2)
+{
+    /* ---- Id 三级自适应 (Standby / Hold / Boost + 迟滞) ---- */
+    {
+        static int16_t id_still_cnt = 0;
+        static uint8_t id_in_boost  = 0;
+        int16_t id_eff;
+        int16_t abs_spd = g_Enc2_SpeedFilt;
+        if (abs_spd < 0) abs_spd = -abs_spd;
+        int16_t abs_d = d2;
+        if (abs_d < 0) abs_d = -abs_d;
+
+        if (abs_spd < 5 && abs_d <= g_M2_Id_StillDeltaMax) {
+            if (id_still_cnt < g_M2_Id_StandbyDelay_ms)
+                id_still_cnt++;
+            id_eff = (id_still_cnt >= g_M2_Id_StandbyDelay_ms)
+                     ? g_M2_Id_Standby_mA : g_M2_Id_Hold_mA;
+        } else {
+            id_still_cnt = 0;
+            id_eff = g_M2_Id_Hold_mA;
+        }
+
+        if (g_M2_CtrlMode == MODE_STEP_ANGLE
+         || g_M2_CtrlMode == MODE_POSITION) {
+            int32_t abs_err = g_M2_StepAngle_Err;
+            if (g_M2_CtrlMode == MODE_POSITION)
+                abs_err = g_M2_PosCmd - g_M2_PosFbk;
+            if (abs_err < 0) abs_err = -abs_err;
+
+            if (!id_in_boost && abs_err > (int32_t)g_M2_Id_BoostEnter)
+                id_in_boost = 1;
+            else if (id_in_boost && abs_err < (int32_t)g_M2_Id_BoostExit)
+                id_in_boost = 0;
+
+            if (id_in_boost) {
+                id_eff = g_M2_Id_Boost_mA;
+                id_still_cnt = 0;
+            }
+        } else {
+            id_in_boost = 0;
+        }
+        g_M2_Id_Eff_mA = id_eff;
+    }
+
+    /* ---- 位置环 外环: PI → 速度参考 (PI-P 结构) ---- */
+    static uint8_t pos_was_active = 0;
+    float pos_spd_ref = 0.0f;
+
+    if (g_M2_CtrlMode == MODE_POSITION) {
+        if (!pos_was_active) {
+            g_M2_PosCmd = g_M2_PosFbk;
+            g_M2_PosPID.integral = 0.0f;
+            pos_was_active = 1;
+        }
+        int32_t pos_err = g_M2_PosCmd - g_M2_PosFbk;
+        if (pos_err >  30000) pos_err =  30000;
+        if (pos_err < -30000) pos_err = -30000;
+
+        float p_out = g_M2_PosPID.kp * (float)pos_err;
+        float i_out = g_M2_PosPID.integral;
+        if (g_M2_PosPID.ki != 0.0f) {
+            if ((i_out > 0.0f && pos_err < 0) ||
+                (i_out < 0.0f && pos_err > 0))
+                i_out = 0.0f;
+            i_out += g_M2_PosPID.ki * (float)pos_err;
+            if (i_out >  g_M2_PosPID.integ_limit) i_out =  g_M2_PosPID.integ_limit;
+            if (i_out < -g_M2_PosPID.integ_limit) i_out = -g_M2_PosPID.integ_limit;
+        }
+        pos_spd_ref = p_out + i_out;
+        if (pos_spd_ref > g_M2_PosPID.out_limit) {
+            i_out -= (pos_spd_ref - g_M2_PosPID.out_limit);
+            pos_spd_ref = g_M2_PosPID.out_limit;
+        } else if (pos_spd_ref < -g_M2_PosPID.out_limit) {
+            i_out -= (pos_spd_ref + g_M2_PosPID.out_limit);
+            pos_spd_ref = -g_M2_PosPID.out_limit;
+        }
+        g_M2_PosPID.integral = i_out;
+        g_M2_PosPID.output = pos_spd_ref;
+        g_Dbg_Pos_iqmA  = pos_spd_ref;
+        g_Dbg_Pos_pTerm = (float)pos_err;
+    } else {
+        if (pos_was_active) g_M2_PosPID.integral = 0.0f;
+        pos_was_active = 0;
+    }
+
+    /* ---- 步距角闭环: 直接 PD→Iq ---- */
+    static uint8_t step_was_active = 0;
+
+    if (g_M2_CtrlMode == MODE_STEP_ANGLE) {
+        if (!step_was_active) {
+            g_M2_StepAngle_Ref = g_M2_PosFbk;
+            g_M2_StepAnglePD.integral = 0.0f;
+            g_M2_PI_d.integral = 0;
+            g_M2_PI_q.integral = 0;
+            g_M2_AngleDelta = 0;
+            step_was_active = 1;
+        }
+        int32_t pos_err = g_M2_StepAngle_Ref - g_M2_PosFbk;
+        if (pos_err >  30000) pos_err =  30000;
+        if (pos_err < -30000) pos_err = -30000;
+        g_M2_StepAngle_Err = pos_err;
+
+        float p_term = g_M2_StepAnglePD.kp * (float)pos_err;
+        float d_term = g_M2_StepAnglePD.kd
+                     * ((float)g_Enc2_SpeedFilt - (float)g_M2_RPM_Cmd);
+
+        float i_term = g_M2_StepAnglePD.integral;
+        if (g_M2_StepAnglePD.ki != 0.0f) {
+            if ((i_term > 0.0f && pos_err < 0) ||
+                (i_term < 0.0f && pos_err > 0))
+                i_term = 0.0f;
+            i_term += g_M2_StepAnglePD.ki * (float)pos_err;
+            if (i_term >  g_M2_StepAnglePD.integ_limit) i_term =  g_M2_StepAnglePD.integ_limit;
+            if (i_term < -g_M2_StepAnglePD.integ_limit) i_term = -g_M2_StepAnglePD.integ_limit;
+        } else {
+            i_term = 0.0f;
+        }
+
+        float iq_mA = p_term - d_term + i_term;
+        if (iq_mA > g_M2_StepAnglePD.out_limit) {
+            i_term -= (iq_mA - g_M2_StepAnglePD.out_limit);
+            iq_mA = g_M2_StepAnglePD.out_limit;
+        } else if (iq_mA < -g_M2_StepAnglePD.out_limit) {
+            i_term -= (iq_mA + g_M2_StepAnglePD.out_limit);
+            iq_mA = -g_M2_StepAnglePD.out_limit;
+        }
+        g_M2_StepAnglePD.integral = i_term;
+        g_M2_StepAnglePD.output   = iq_mA;
+
+        g_Dbg_Spd_RpmCmd = (float)(g_M2_StepAngle_Ref / 65536);
+        g_Dbg_Spd_Err    = (float)pos_err;
+        g_Dbg_Spd_IqOut  = iq_mA;
+
+        __disable_irq();
+        g_M2_Idq_Ref.d = MA_TO_Q15(g_M2_Id_Eff_mA);
+        g_M2_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
+        __enable_irq();
+    } else {
+        step_was_active = 0;
+    }
+
+    /* ---- 速度闭环 PI (速度模式PI / 位置模式P-only内环) ---- */
+    static uint8_t spd_was_active = 0;
+    static int16_t rpm_cmd_ramped = 0;
+
+    if (g_M2_CtrlMode == MODE_SPEED
+     || g_M2_CtrlMode == MODE_POSITION) {
+
+        if (!spd_was_active) {
+            g_M2_SpeedPI.integral = 0.0f;
+            g_M2_PI_d.integral = 0;
+            g_M2_PI_q.integral = 0;
+            rpm_cmd_ramped = (int16_t)g_Enc2_SpeedFilt;
+            spd_was_active = 1;
+        }
+
+        float rpm_target;
+        if (g_M2_CtrlMode == MODE_POSITION) {
+            rpm_target = pos_spd_ref;
+        } else {
+            int16_t target = g_M2_RPM_Cmd;
+            int16_t ramp   = g_M2_RpmRampRate;
+            if (ramp < 1) ramp = 1;
+            if (rpm_cmd_ramped < target) {
+                rpm_cmd_ramped += ramp;
+                if (rpm_cmd_ramped > target) rpm_cmd_ramped = target;
+            } else if (rpm_cmd_ramped > target) {
+                rpm_cmd_ramped -= ramp;
+                if (rpm_cmd_ramped < target) rpm_cmd_ramped = target;
+            }
+            rpm_target = (float)rpm_cmd_ramped;
+            g_Dbg_Spd_RpmCmd = rpm_target;
+        }
+
+        float iq_mA;
+        if (g_M2_CtrlMode == MODE_SPEED) {
+            iq_mA = SpeedPI_Run(&g_M2_SpeedPI, rpm_target,
+                                (float)g_Enc2_SpeedFilt);
+        } else {
+            float spd_err = rpm_target - (float)g_Enc2_SpeedFilt;
+            iq_mA = g_M2_SpeedPI.kp * spd_err;
+            if (iq_mA >  g_M2_SpeedPI.out_limit) iq_mA =  g_M2_SpeedPI.out_limit;
+            if (iq_mA < -g_M2_SpeedPI.out_limit) iq_mA = -g_M2_SpeedPI.out_limit;
+            g_M2_SpeedPI.integral = 0.0f;
+            g_M2_SpeedPI.output   = iq_mA;
+        }
+
+        if (g_M2_CtrlMode == MODE_SPEED) {
+            g_Dbg_Spd_Err = rpm_target - (float)g_Enc2_SpeedFilt;
+        } else {
+            g_Dbg_Pos_dTerm = iq_mA;
+        }
+        g_Dbg_Spd_IqOut = iq_mA;
+
+        __disable_irq();
+        g_M2_Idq_Ref.d = MA_TO_Q15(g_M2_Id_Eff_mA);
+        g_M2_Idq_Ref.q = (int16_t)(iq_mA * MA_TO_Q15_F);
+        __enable_irq();
+    } else if (g_M2_CtrlMode != MODE_STEP_ANGLE) {
+        spd_was_active = 0;
+        rpm_cmd_ramped = 0;
+    }
+}
+
+/* ================================================================
+ * ADC1_2_IRQHandler 子函数 — 保持 ISR 主体精简可读
+ * ================================================================ */
+
+/** @brief  M1 电角度更新 (校准/开环/步距角/闭环 四路分发)
+ *
+ * 校准中: 锁定 0° (PI 对齐 d 轴)
+ * 开环:   斜坡分频递增 delta → 累加角度 (高电感防丢步)
+ * 步距角: 编码器角度 × 极对数 (Park 用), 同时递增角度指令 (控制用)
+ * 闭环:   纯编码器角度 × 极对数 */
+static inline void M1_UpdateElecAngle(void)
+{
+    if (g_CurrLoopCalibInProgress_M1) {
+        return;  /* 保持 0° 电角度 */
+    }
+    if (g_M1_CtrlMode == MODE_OPEN_LOOP) {
+        /* 斜坡分频: delta 每 M1_RAMP_DIV 个 ISR 才 ±1, 角度每 ISR 递增 */
+        static uint8_t ramp_cnt = 0;
+        if (++ramp_cnt >= M1_RAMP_DIV) {
+            ramp_cnt = 0;
+            int16_t cur = g_M1_AngleDelta;
+            if (cur < g_M1_AngleDelta_Target)       cur++;
+            else if (cur > g_M1_AngleDelta_Target)  cur--;
+            g_M1_AngleDelta = cur;
+        }
+        g_M1_ElecAngle_Q15 = (int16_t)((uint16_t)g_M1_ElecAngle_Q15
+                            + (uint16_t)g_M1_AngleDelta);
+        return;
+    }
+    /* 步距角/速度/位置: 编码器角度 × 极对数 × 方向 + 偏移 */
+    g_M1_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc1_Angle * M1_POLE_PAIRS)
+                        * M1_ENC_DIR + g_M1_ElecAngleOffset;
+    if (g_M1_CtrlMode == MODE_STEP_ANGLE)
+        M1_OpenLoop_IncAngle_Ref();
+}
+
+/** @brief  M2 电角度更新 (逻辑同 M1, 无斜坡分频) */
+static inline void M2_UpdateElecAngle(void)
+{
+    if (g_CurrLoopCalibInProgress_M2) {
+        return;
+    }
+    if (g_M2_CtrlMode == MODE_OPEN_LOOP) {
+        OpenLoop_IncAngle(&g_M2_ElecAngle_Q15, &g_M2_AngleDelta, g_M2_AngleDelta_Target);
+        return;
+    }
+    g_M2_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc2_Angle * M2_POLE_PAIRS)
+                        + g_M2_ElecAngleOffset;
+    if (g_M2_CtrlMode == MODE_STEP_ANGLE)
+        OpenLoop_IncAngle_Ref();
+}
+
+/** @brief  电角速度估算: 当前 − 上次 (int16 自然回绕) */
+static inline int16_t CalcSpeedDpp(int16_t *prev, int16_t current)
+{
+    int16_t dpp = current - *prev;
+    *prev = current;
+    return dpp;
+}
+
+/** @brief  电流环阶跃响应录制 (17kHz, M1/M2 由 g_StepCapMotor 选择)
+ *
+ * Phase0: d轴阶跃 (Id=target, Iq=0)
+ * Phase1: q轴阶跃 (Id=0, Iq=target)
+ * 录满 STEP_CAP_DEPTH 点后 state→2, 由 while(1) StepCap_Playback 回放 */
+static inline void StepCap_Record(void)
+{
+    if (g_StepCapState != 1) return;
+
+    uint16_t idx = g_StepCapIdx;
+    int16_t target_q15 = MA_TO_Q15(g_StepCapTarget_mA);
+
+    /* 指针别名: 按 g_StepCapMotor 指向目标电机变量 */
+    volatile DQ_Q15_t *ref   = (g_StepCapMotor == 0) ? &g_M2_Idq_Ref   : &g_M1_Idq_Ref;
+    volatile DQ_Q15_t *fbk   = (g_StepCapMotor == 0) ? &g_M2_Idq       : &g_M1_Idq;
+    volatile int16_t  *iq_ma = (g_StepCapMotor == 0) ? &g_M2_Iq_Ref_mA : &g_M1_Iq_Ref_mA;
+
+    /* 阶跃施加点: Phase0→d轴, Phase1→q轴 */
+    if (idx == STEP_CAP_PRE) {
+        ref->d = (g_StepCapPhase == 0) ? target_q15 : 0;
+        ref->q = (g_StepCapPhase == 0) ? 0 : target_q15;
+    }
+
+    if (idx < STEP_CAP_DEPTH) {
+        g_StepCapBuf[idx].id_ref = ref->d;
+        g_StepCapBuf[idx].iq_ref = ref->q;
+        g_StepCapBuf[idx].id_fbk = fbk->d;
+        g_StepCapBuf[idx].iq_fbk = fbk->q;
+        g_StepCapIdx = idx + 1;
+    } else {
+        ref->d = 0;
+        ref->q = 0;
+        *iq_ma = 0;
+        g_StepCapState = 2;
+    }
+}
 
 /* USER CODE END 1 */

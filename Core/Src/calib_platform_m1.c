@@ -63,7 +63,7 @@ void CalibM1_Start(void)
     g_CurrLoopCalibInProgress_M1 = 1;
     g_CalibVdDirectActive_M1    = 1;
     g_CalibVdDirect_M1          = 0;
-    g_M1_CtrlMode = M2_MODE_OPEN_LOOP;
+    g_M1_CtrlMode = MODE_OPEN_LOOP;
     g_M1_AngleDelta_Target = 0;
     g_M1_ElecAngle_Q15 = 0;
     g_M1_Idq_Ref.d = 0;
@@ -130,7 +130,10 @@ void CalibM1_OnDone(void)
     g_VofaFrame.ch[4] = res.rs_ohm;
     g_VofaFrame.ch[5] = res.ls_henry * 1000.0f;
     g_VofaFrame.ch[6] = 0.0f;
-    g_VofaSrc = VOFA_SRC_NORMAL;
+    g_VofaFrame.ch[7] = 0.0f;
+    g_VofaFrame.ch[8] = 0.0f;
+    g_VofaFrame.ch[9] = 0.0f;
+    g_VofaSrc = VOFA_SRC_IDLE;   /* 停止发送, 保留最后一帧校准结果供 VOFA+ 捕捉 */
     g_CalibVdDirect_M1       = 0;
     g_CalibVdDirectActive_M1 = 0;
     g_CurrLoopCalibInProgress_M1 = 0;
@@ -160,4 +163,7 @@ void CalibM1_FillVofa(void)
     g_VofaFrame.ch[4] = res.rs_ohm;
     g_VofaFrame.ch[5] = res.ls_henry * 1000.0f;
     g_VofaFrame.ch[6] = 0.0f;
+    g_VofaFrame.ch[7] = 0.0f;
+    g_VofaFrame.ch[8] = 0.0f;
+    g_VofaFrame.ch[9] = 0.0f;
 }

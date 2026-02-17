@@ -1,5 +1,7 @@
-../Core/Src/vofa_engine.c:62:13:fill_normal	0	static
-../Core/Src/vofa_engine.c:135:13:fill_kth71_calib	0	static
-../Core/Src/vofa_engine.c:161:13:fill_step_playback	0	static
-../Core/Src/vofa_engine.c:197:6:Vofa_StartTIM4	0	static
-../Core/Src/vofa_engine.c:204:6:Vofa_OnTIM4_1ms	8	static
+../Core/Src/vofa_engine.c:69:13:fill_normal	0	static
+../Core/Src/vofa_engine.c:148:13:fill_kth71_calib	0	static
+../Core/Src/vofa_engine.c:185:13:fill_step_playback	0	static
+../Core/Src/vofa_engine.c:232:13:fill_follow	0	static
+../Core/Src/vofa_engine.c:252:6:Vofa_InitDMA	0	static,ignoring_inline_asm
+../Core/Src/vofa_engine.c:260:6:Vofa_StartTIM4	0	static
+../Core/Src/vofa_engine.c:267:6:Vofa_OnTIM4_1ms	8	static

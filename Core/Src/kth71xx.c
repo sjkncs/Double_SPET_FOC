@@ -199,6 +199,14 @@ void KTH71_WriteZero(const KTH7111_Hw_t *hw, uint16_t angle)
      * 需固化时另调 WriteRegToMTP. */
 }
 
+uint16_t KTH71_ReadZero(const KTH7111_Hw_t *hw)
+{
+    uint8_t lo, hi;
+    KTH71_ReadReg(hw, KTH71_REG_ZERO_LO, &lo);
+    KTH71_ReadReg(hw, KTH71_REG_ZERO_HI, &hi);
+    return ((uint16_t)hi << 8) | lo;
+}
+
 /* ====================================================================
  * 4. ISR 快速双编码器读取 (17kHz ADC ISR 调用)
  *

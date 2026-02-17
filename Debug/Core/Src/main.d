@@ -44,7 +44,8 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  ../Core/Inc/curr_loop_autocalib.h ../Core/Inc/flash_params.h \
  ../Core/Inc/zero_calib.h ../Core/Inc/kth71xx.h \
  ../Core/Inc/calib_platform_m2.h ../Core/Inc/calib_platform_m1.h \
- ../Core/Inc/foc_adapt.h ../Core/Inc/vofa_engine.h
+ ../Core/Inc/foc_adapt.h ../Core/Inc/vofa_engine.h \
+ ../Core/Inc/follow_m1m2.h
 ../Core/Inc/main.h:
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_hal.h:
 ../Core/Inc/stm32g4xx_hal_conf.h:
@@ -97,3 +98,4 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
 ../Core/Inc/calib_platform_m1.h:
 ../Core/Inc/foc_adapt.h:
 ../Core/Inc/vofa_engine.h:
+../Core/Inc/follow_m1m2.h:

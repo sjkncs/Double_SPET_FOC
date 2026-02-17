@@ -123,7 +123,7 @@ void FOC_UpdatePI_ByVbus(void)
     }
 
     /* M2: 基于 g_M2_PI_Base 缩放 (校准期间跳过) */
-    if (!g_CurrLoopCalibInProgress) {
+    if (!g_CurrLoopCalibInProgress_M2) {
         int32_t m2_kp = (int32_t)((uint64_t)g_M2_PI_Base.kp * g_M2_PI_Base.vbus_mv / vbus);
         int32_t m2_ki = (int32_t)((uint64_t)g_M2_PI_Base.ki * g_M2_PI_Base.vbus_mv / vbus);
         g_M2_PI_d.kp = m2_kp;  g_M2_PI_d.ki = m2_ki;

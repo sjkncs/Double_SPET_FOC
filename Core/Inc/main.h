@@ -63,13 +63,13 @@ typedef struct {
     int16_t Ib;   /* B相线电流 (M*_2引脚), Q1.15 */
 } PhaseCurrentQ15_t;
 
-/* M2 控制模式 (Live Watch 切换 g_M2_CtrlMode) */
+/* 电机控制模式 (M1/M2 共用, Live Watch 切换 g_M1_CtrlMode / g_M2_CtrlMode) */
 typedef enum {
-    M2_MODE_OPEN_LOOP = 0,   /* 电流闭环 + 角度开环 (Id=mA, 步进) */
-    M2_MODE_SPEED,           /* 速度闭环 (编码器角度, 速度PI→Iq) */
-    M2_MODE_POSITION,        /* 位置闭环 (PD→mA, 直出电流环) */
-    M2_MODE_STEP_ANGLE,      /* 步距角闭环 (电角度PI→Iq + Id磁弹簧, 抗齿槽) */
-} M2_CtrlMode_t;
+    MODE_OPEN_LOOP = 0,      /* 电流闭环 + 角度开环 (Id=mA, 步进) */
+    MODE_SPEED,              /* 速度闭环 (编码器角度, 速度PI→Iq) */
+    MODE_POSITION,           /* 位置闭环 (PD→mA, 直出电流环) */
+    MODE_STEP_ANGLE,         /* 步距角闭环 (电角度PI→Iq + Id磁弹簧, 抗齿槽) */
+} MotorCtrlMode_t;
 
 /* 调试用: 物理电流值 (单位: mA) */
 typedef struct {
@@ -133,10 +133,10 @@ typedef struct {
     float output;         /* 最终输出 (mA, 限幅后, 只读诊断) */
 } PosPID_Float_t;
 
-/* VOFA+ JustFloat 发送帧 (7通道 + 帧尾)
- * I0~I5: 模式相关, I6: Id_Eff(mA) 共享
+/* VOFA+ JustFloat 发送帧 (10通道 + 帧尾)
+ * I0~I5: 模式相关, I6: Id_Eff(mA), I7: Id_fbk(mA), I8: Iq_fbk(mA), I9: VqSat报警
  * 帧尾 0x7F800000 = IEEE754 +Inf, 小端存储 {0x00,0x00,0x80,0x7F} */
-#define VOFA_CH_COUNT  7U
+#define VOFA_CH_COUNT  10U
 
 typedef struct {
     float    ch[VOFA_CH_COUNT];
@@ -156,11 +156,15 @@ typedef struct {
 #define PWM_HALF_RANGE  (PWM_CENTER - PWM_MIN)        /* Q15满量程对应的PWM半幅 = 4850 */
 
 /* 电机 → HRTIM定时器映射 (每电机2相, 每相1个Timer控制H桥)
- * sTimerxRegs[] 数组索引: A=0, B=1, C=2, D=3, E=4, F=5 */
-#define M1_TIMER_PHASE_A  0U   /* Timer A */
-#define M1_TIMER_PHASE_B  1U   /* Timer B */
-#define M2_TIMER_PHASE_A  2U   /* Timer C */
-#define M2_TIMER_PHASE_B  3U   /* Timer D */
+ * sTimerxRegs[] 数组索引: A=0, B=1, C=2, D=3, E=4, F=5
+ *   HRTIMA(0) → M1 Phase A → 电流采样 PA2 (ADC1_JDR1)
+ *   HRTIMB(1) → M1 Phase B → 电流采样 PA0 (ADC2_JDR1)
+ *   HRTIMC(2) → M2 Phase A → 电流采样 PA1 (ADC2_JDR2)
+ *   HRTIMD(3) → M2 Phase B → 电流采样 PA3 (ADC1_JDR2) */
+#define M1_TIMER_PHASE_A  0U   /* Timer A — PA2 */
+#define M1_TIMER_PHASE_B  1U   /* Timer B — PA0 */
+#define M2_TIMER_PHASE_A  2U   /* Timer C — PA1 */
+#define M2_TIMER_PHASE_B  3U   /* Timer D — PA3 */
 
 /* ---- 电机参数 (切换电机时修改此区块) ----
  * 规格书与代码引用: 见 docs/MOTOR_8HA0205-10_SPEC.md
@@ -178,8 +182,10 @@ typedef struct {
  *
  * PI极零对消比: ki/kp = Rs / (Ls_eff × fs) ≈ 18.5 / (28mH × 17000) ≈ 0.039
  *   (注: 当前 ki/kp=0.205 是按 Ls=5.3mH 标定, 阶跃响应为一阶无超调, 可用) */
-#define M1_POLE_PAIRS     50U
-#define M2_POLE_PAIRS     50U
+#define M1_POLE_PAIRS     12U   /* 0.9° 步距角: 400步/圈, 100极对 */
+#define M2_POLE_PAIRS     50U    /* 1.8° 步距角: 200步/圈, 50极对 */
+#define M1_RAMP_DIV       2U     /* M1 开环斜坡分频: delta 每 N 个 ISR 才 ±1 (高电感需慢加速) */
+#define M1_ENC_DIR        (1)    /* M1 编码器方向: +1=同向, -1=反向 (已通过交换接线修正) */
 #define M2_RS_MOHM        18500U  /* 相电阻 mΩ (仅供注释参考, 不参与运算) */
 #define M2_LS_UH          5300U   /* 相电感 µH @1kHz (仅供注释参考) */
 
@@ -203,14 +209,22 @@ typedef struct {
 #define VBUS_MV_SCALE     37494U
 #define VBUS_MV_SHIFT     13U
 
-/* PI自适应: 基准电压 (PI参数的设计点) */
+/* PI自适应: 基准电压 + 各电机出厂标定增益 (Flash 擦除后回退基准) */
 #define VBUS_NOMINAL_MV   12000U
+#define PI_M1_KP_NOM      21333
+#define PI_M1_KI_NOM      1130
+#define PI_M2_KP_NOM      80000
+#define PI_M2_KI_NOM      16400
 
-/* 速度环安全限幅 */
+/* M2 速度环安全限幅 */
 #define M2_RPM_CMD_MAX     1000   /* 最大允许指令 RPM */
 #define M2_IQ_LIMIT_MAX_MA 600    /* 最大允许力矩 mA */
-#define VQ_SAT_THRESHOLD   32000  /* Q15 电压饱和判定: 仅用于Live Watch诊断 */
 #define M2_RPM_RAMP_RATE   2      /* 斜坡限速: RPM/ms (1000→满速需1s, 可Live Watch调) */
+
+/* M1 速度环安全限幅 */
+#define M1_RPM_CMD_MAX     1000   /* 最大允许指令 RPM */
+#define M1_IQ_LIMIT_MAX_MA 600    /* 最大允许力矩 mA */
+#define M1_RPM_RAMP_RATE   2      /* 斜坡限速: RPM/ms (1000→满速需1s, 可Live Watch调) */
 
 /* 位置环参数 (单位: 编码器 counts, 65536 = 1 圈 = 360°)
  * 位置 PD → mA 直出电流环, 跳过速度PI, 响应更快
@@ -229,10 +243,10 @@ typedef struct {
 
 /* FOC 电流采样
  * ADC通道映射 (注入模式, 12-bit左对齐, HRTIM_TRG2触发):
- *   M1_Ia: PA0 → ADC2_INJ_RANK1 (JDR1)
- *   M1_Ib: PA2 → ADC1_INJ_RANK1 (JDR1)
- *   M2_Ia: PA1 → ADC2_INJ_RANK2 (JDR2)
- *   M2_Ib: PA3 → ADC1_INJ_RANK2 (JDR2)
+ *   M1_Ia: PA2 → ADC1_INJ_RANK1 (JDR1)  — HRTIMA Phase A
+ *   M1_Ib: PA0 → ADC2_INJ_RANK1 (JDR1)  — HRTIMB Phase B
+ *   M2_Ia: PA1 → ADC2_INJ_RANK2 (JDR2)  — HRTIMC Phase A
+ *   M2_Ib: PA3 → ADC1_INJ_RANK2 (JDR2)  — HRTIMD Phase B
  *   Vbus:  PB1 → ADC3_INJ_RANK1 (JDR1)
  */
 extern volatile PhaseCurrentQ15_t g_M1Current;
@@ -291,16 +305,17 @@ extern volatile int32_t g_Enc1_SpeedFilt;   /* 编码器1转速 (RPM, IIR低通)
 extern volatile int32_t g_Enc2_SpeedFilt;   /* 编码器2转速 (RPM, IIR低通) */
 
 extern VofaFrame_t g_VofaFrame;             /* VOFA+ JustFloat DMA 发送帧 */
-extern volatile uint8_t  g_DoKth71Calib;    /* Live Watch 置 1: 触发 ANLC 非线性校准 */
-extern volatile uint8_t  g_DoZeroCalib;       /* Live Watch 置 1: 触发电角度零点标定 */
-extern volatile uint8_t  g_DoCurrLoopCalib;   /* Live Watch 置 1: 电流环自校准 (开环电压注入 DC+AC 辨 R/L → PI) */
-extern volatile uint8_t  g_CurrLoopCalibInProgress;  /* 自校准进行中: ISR 累加 Vd/Id */
-extern volatile uint8_t  g_CurrLoopCalibResultReady;  /* 校准引擎完成标志 (TIM3 置 1 → main 清 0) */
-extern volatile uint8_t  g_CalibVdDirectActive;      /* M2: 1=ISR 跳过 PI, 直接写 g_CalibVdDirect */
-extern volatile int16_t  g_CalibVdDirect;             /* M2: 开环电压注入 D 轴 Q15 值 */
-extern volatile int32_t  g_CalibVdAcc;   /* M2: 17kHz ISR 累加 Vd */
-extern volatile int32_t  g_CalibIdAcc;   /* M2: 17kHz ISR 累加 Id */
-extern volatile uint16_t g_CalibAccCnt;  /* M2: 累加计数 */
+extern volatile uint8_t  g_DoKth71Calib_M2;    /* Live Watch 置 1: 触发 Enc2/M2 ANLC 非线性校准 */
+extern volatile uint8_t  g_DoKth71Calib_M1; /* Live Watch 置 1: 触发 Enc1/M1 ANLC 非线性校准 */
+extern volatile uint8_t  g_DoZeroCalib_M2;       /* Live Watch 置 1: 触发电角度零点标定 */
+extern volatile uint8_t  g_DoCurrLoopCalib_M2;   /* Live Watch 置 1: 电流环自校准 (开环电压注入 DC+AC 辨 R/L → PI) */
+extern volatile uint8_t  g_CurrLoopCalibInProgress_M2;  /* 自校准进行中: ISR 累加 Vd/Id */
+extern volatile uint8_t  g_CurrLoopCalibResultReady_M2;  /* 校准引擎完成标志 (TIM3 置 1 → main 清 0) */
+extern volatile uint8_t  g_CalibVdDirectActive_M2;      /* M2: 1=ISR 跳过 PI, 直接写 g_CalibVdDirect_M2 */
+extern volatile int16_t  g_CalibVdDirect_M2;             /* M2: 开环电压注入 D 轴 Q15 值 */
+extern volatile int32_t  g_CalibVdAcc_M2;   /* M2: 17kHz ISR 累加 Vd */
+extern volatile int32_t  g_CalibIdAcc_M2;   /* M2: 17kHz ISR 累加 Id */
+extern volatile uint16_t g_CalibAccCnt_M2;  /* M2: 累加计数 */
 
 /* M1 电流环校准 ISR 支持 */
 extern volatile uint8_t  g_DoCurrLoopCalib_M1;        /* Live Watch 置 1: M1 电流环自校准 */
@@ -350,28 +365,28 @@ extern volatile uint8_t g_FlashParamsLoaded;  /* 0=未加载/无效, 1=M1有效,
 extern volatile int16_t g_M2_wLs_factor;
 
 /* M2 速度闭环 */
-extern volatile M2_CtrlMode_t g_M2_CtrlMode;   /* Live Watch: 0=开环, 1=速度, 2=位置 */
+extern volatile MotorCtrlMode_t g_M2_CtrlMode;   /* Live Watch: 0=开环, 1=速度, 2=位置 */
 extern SpeedPI_Float_t g_M2_SpeedPI;           /* 速度PI (浮点, mA 单位, 1kHz) */
 extern volatile int16_t g_M2_ElecAngleOffset;  /* 电角度偏移补偿 Q15, Live Watch 可调 */
-extern volatile uint8_t g_M2_VqSaturated;      /* 电流环q轴电压饱和标志 (仅Live Watch诊断) */
+extern volatile uint8_t g_M2_VqSaturated;      /* 电压圆饱和标志: Vd²+Vq²>Max² (限幅前检测) */
 extern int16_t g_M2_RpmRampRate;               /* 斜坡限速 RPM/ms (Live Watch 可调) */
 
-/* 位置环 PID→mA (M2_MODE_POSITION 时生效, 直出电流环) */
+/* 位置环 PID→mA (MODE_POSITION 时生效, 直出电流环) */
 extern PosPID_Float_t g_M2_PosPID;            /* 位置PID (浮点, counts→mA, 1kHz) */
 extern volatile int32_t g_M2_PosCmd;          /* 位置指令 (counts, Live Watch 可调) */
 extern volatile int32_t g_M2_PosFbk;          /* 位置反馈 (counts, 编码器累计) */
 
-/* 位置环调试 (TIM3写→VOFA读, 仅 M2_MODE_POSITION) */
+/* 位置环调试 (TIM3写→VOFA读, 仅 MODE_POSITION) */
 extern volatile float g_Dbg_Pos_iqmA;        /* 位置PD最终输出 mA */
 extern volatile float g_Dbg_Pos_pTerm;       /* P项 mA (衰减后) */
 extern volatile float g_Dbg_Pos_dTerm;       /* D项 mA */
 
-/* 速度环调试 (TIM3写→VOFA读, 仅 M2_MODE_SPEED) */
+/* 速度环调试 (TIM3写→VOFA读, 仅 MODE_SPEED) */
 extern volatile float g_Dbg_Spd_RpmCmd;      /* 斜坡后实际 RPM 指令 (PI 跟踪目标) */
 extern volatile float g_Dbg_Spd_Err;         /* 速度误差 = RpmCmd - SpeedFilt (RPM) */
 extern volatile float g_Dbg_Spd_IqOut;       /* 速度PI输出 = Iq指令 (mA) */
 
-/* ---- 步距角闭环 (M2_MODE_STEP_ANGLE) ----
+/* ---- 步距角闭环 (MODE_STEP_ANGLE) ----
  * 原理: 机械位置指令匀速递增, 位置误差→Iq力矩, 速度→阻尼, Id磁弹簧抗齿槽
  *       控制在机械位置空间 (encoder counts), 避免极对数放大效应
  *       参考: Trinamic TMC4671 position mode + SimpleFOC angle loop */
@@ -393,9 +408,9 @@ extern int16_t g_M2_Id_BoostExit;            /* 退出Boost阈值 counts (默认
 extern volatile int16_t g_M2_Id_Eff_mA;      /* 当前有效Id (只读诊断, ISR写) */
 
 /* ============================================================
- * M1 控制变量 (与 M2 镜像, 复用 M2_CtrlMode_t 枚举)
+ * M1 控制变量 (与 M2 镜像, 共用 MotorCtrlMode_t 枚举)
  * ============================================================ */
-extern volatile M2_CtrlMode_t g_M1_CtrlMode;
+extern volatile MotorCtrlMode_t g_M1_CtrlMode;
 extern volatile int16_t g_M1_RPM_Cmd;
 extern int16_t g_M1_RpmRampRate;
 
@@ -425,7 +440,7 @@ extern volatile int16_t g_M1_Id_Eff_mA;
 
 /* M1 电角度偏移 + dq 解耦 */
 extern volatile int16_t g_M1_ElecAngleOffset;
-extern volatile uint8_t g_M1_VqSaturated;      /* 电流环q轴电压饱和标志 (仅Live Watch诊断) */
+extern volatile uint8_t g_M1_VqSaturated;      /* 电压圆饱和标志: Vd²+Vq²>Max² (限幅前检测) */
 extern volatile int16_t g_M1_wLs_factor;
 
 /* M1 调试 (TIM3写→VOFA读) */
@@ -455,6 +470,7 @@ typedef struct {
 /* 状态: 0=空闲, 1=录制中, 2=回放中, 3=暂停(两轴均完成) */
 extern volatile uint8_t  g_StepCapState;
 extern volatile uint8_t  g_StepCapArm;       /* Live Watch 置1: 启动录制 */
+extern volatile uint8_t  g_StepCapMotor;     /* 0=M2, 1=M1 (Live Watch 选择录制轴) */
 extern volatile uint8_t  g_StepCapPhase;     /* 0=d轴测试, 1=q轴测试 */
 extern volatile uint16_t g_StepCapIdx;       /* 当前写入位置 */
 extern volatile int16_t  g_StepCapTarget_mA; /* 阶跃目标电流 mA (Live Watch设置) */
@@ -590,6 +606,43 @@ ALWAYS_INLINE void FOC_CircleLimitation(volatile DQ_Q15_t *pVdq)
         int16_t new_vq = (int16_t)__builtin_sqrtf((float)(CIRCLE_SQ_MAX - CIRCLE_SQ_VD_MAX));
         pVdq->q = (vq >= 0) ? new_vq : -new_vq;
     }
+}
+
+/** 电压圆饱和诊断: Vd²+Vq² > MaxModule² 即将被 CircleLimitation 裁剪
+ *  在 CircleLimitation 之前调用, 结果写入 g_Mx_VqSaturated */
+ALWAYS_INLINE uint8_t FOC_IsVqSaturated(const volatile DQ_Q15_t *v)
+{
+    uint32_t sq = (uint32_t)((int32_t)v->d * v->d)
+               + (uint32_t)((int32_t)v->q * v->q);
+    return (sq > CIRCLE_SQ_MAX);
+}
+
+/** dq 前馈解耦: Vd -= ωLs·Iq, Vq += ωLs·Id
+ *  speed_dpp = 电角速度 (Q15/ISR), wLs_factor = Ls 缩放因子 (主循环预算)
+ *  开环模式跳过 (编码器角度无意义, 解耦会注入噪声) */
+ALWAYS_INLINE void FOC_DecoupleFF(volatile DQ_Q15_t *vdq,
+                                  int16_t speed_dpp,
+                                  const volatile DQ_Q15_t *idq,
+                                  int16_t wLs_factor,
+                                  MotorCtrlMode_t mode)
+{
+    if (mode == MODE_OPEN_LOOP || wLs_factor == 0) return;
+    int32_t vd_ff = -(int32_t)speed_dpp * (int32_t)idq->q;
+    int32_t vq_ff = +(int32_t)speed_dpp * (int32_t)idq->d;
+    vdq->d = (int16_t)((int32_t)vdq->d + (int16_t)((vd_ff * (int32_t)wLs_factor) >> 20));
+    vdq->q = (int16_t)((int32_t)vdq->q + (int16_t)((vq_ff * (int32_t)wLs_factor) >> 20));
+}
+
+/** 逆 Park + 延迟补偿: 电角度前推一个 ISR 周期补偿 ADC→PWM 延迟
+ *  comp_angle = elec_angle + speed_dpp (约 1 个 PWM 周期的电角度变化) */
+ALWAYS_INLINE void FOC_InvParkWithComp(int16_t elec_angle, int16_t speed_dpp,
+                                       const volatile DQ_Q15_t *vdq,
+                                       volatile AlphaBeta_Q15_t *vab)
+{
+    int16_t comp_angle = elec_angle + speed_dpp;
+    SinCos_Q15_t sc;
+    FOC_CalcSinCos(comp_angle, &sc);
+    FOC_InvParkTransform(&sc, vdq, vab);
 }
 
 /** 速度环 PI (浮点, 输入 RPM, 输出 mA, 1kHz 调用)

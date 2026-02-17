@@ -38,15 +38,15 @@ static CurrLoopCalib_Handle_t s_calibHandle;   /**< 校准引擎句柄 (不暴�
 /** @brief 设置 D 轴开环电压 (ISR 直接写 PWM, 跳过 PI) */
 static void plat_setVd(int16_t vd_q15)
 {
-    g_CalibVdDirect = vd_q15;
+    g_CalibVdDirect_M2 = vd_q15;
 }
 
 /** @brief 读取 1ms 平均 Id (ISR 累加值 / 累加次数) */
 static void plat_getIdq(int16_t *id_q15, int16_t *iq_q15)
 {
-    uint16_t cnt = g_CalibAccCnt;
+    uint16_t cnt = g_CalibAccCnt_M2;
     if (cnt > 0)
-        *id_q15 = (int16_t)(g_CalibIdAcc / (int32_t)cnt);
+        *id_q15 = (int16_t)(g_CalibIdAcc_M2 / (int32_t)cnt);
     else
         *id_q15 = g_M2_Idq.d;
     *iq_q15 = g_M2_Idq.q;
@@ -59,16 +59,16 @@ static void plat_getIdq(int16_t *id_q15, int16_t *iq_q15)
  */
 static void plat_getVdq(int16_t *vd_q15, int16_t *vq_q15)
 {
-    uint16_t cnt = g_CalibAccCnt;
+    uint16_t cnt = g_CalibAccCnt_M2;
     if (cnt > 0)
-        *vd_q15 = (int16_t)(g_CalibVdAcc / (int32_t)cnt);
+        *vd_q15 = (int16_t)(g_CalibVdAcc_M2 / (int32_t)cnt);
     else
         *vd_q15 = g_M2_Vdq.d;
     *vq_q15 = g_M2_Vdq.q;
     /* 读完清零累加器，为下一个 1ms 窗口准备 */
-    g_CalibVdAcc  = 0;
-    g_CalibIdAcc  = 0;
-    g_CalibAccCnt = 0;
+    g_CalibVdAcc_M2  = 0;
+    g_CalibIdAcc_M2  = 0;
+    g_CalibAccCnt_M2 = 0;
 }
 
 /** @brief 读取当前母线电压 (mV) */
@@ -81,10 +81,10 @@ static uint32_t plat_getVbusMv(void) { return g_Vbus_mV; }
  * ==================================================================== */
 void CalibM2_Start(void)
 {
-    g_CurrLoopCalibInProgress = 1;
-    g_CalibVdDirectActive     = 1;      /* ISR 跳过 PI, 直接写 Vd */
-    g_CalibVdDirect           = 0;
-    g_M2_CtrlMode = M2_MODE_OPEN_LOOP;
+    g_CurrLoopCalibInProgress_M2 = 1;
+    g_CalibVdDirectActive_M2     = 1;      /* ISR 跳过 PI, 直接写 Vd */
+    g_CalibVdDirect_M2           = 0;
+    g_M2_CtrlMode = MODE_OPEN_LOOP;
     g_M2_AngleDelta_Target = 0;
     g_M2_ElecAngle_Q15 = 0;
     g_M2_Idq_Ref.d = 0;    /* PI 不参与，清零以防万一 */
@@ -107,7 +107,7 @@ void CalibM2_Start(void)
     CurrLoopCalib_Init(&s_calibHandle, &plat, &params);
     CurrLoopCalib_Start(&s_calibHandle);
 
-    g_VofaSrc = VOFA_SRC_CURR_CALIB;   /* TIM4 自动发送校准监控帧 */
+    g_VofaSrc = VOFA_SRC_CURR_CALIB_M2;   /* TIM4 自动发送校准监控帧 */
 }
 
 /* ====================================================================
@@ -178,26 +178,29 @@ void CalibM2_OnDone(void)
     g_VofaFrame.ch[4] = res.rs_ohm;
     g_VofaFrame.ch[5] = res.ls_henry * 1000.0f;
     g_VofaFrame.ch[6] = 0.0f;
-    g_VofaSrc = VOFA_SRC_NORMAL;   /* 恢复正常 VOFA 数据源 */
+    g_VofaFrame.ch[7] = 0.0f;
+    g_VofaFrame.ch[8] = 0.0f;
+    g_VofaFrame.ch[9] = 0.0f;
+    g_VofaSrc = VOFA_SRC_IDLE;   /* 停止发送, 保留最后一帧校准结果供 VOFA+ 捕捉 */
     /* 恢复 PI 控制（RAMP_DOWN 已将电压降至 0，切回 PI 不会有跳变） */
-    g_CalibVdDirect       = 0;
-    g_CalibVdDirectActive = 0;
-    g_CurrLoopCalibInProgress = 0;
+    g_CalibVdDirect_M2       = 0;
+    g_CalibVdDirectActive_M2 = 0;
+    g_CurrLoopCalibInProgress_M2 = 0;
 }
 
 /* ====================================================================
  * CalibM2_OnTIM3_1ms — TIM3 1ms 中断入口
  *
  * 若校准未启动则直接返回 (约 3 条指令开销).
- * 校准引擎返回 DONE/ERROR 时置 g_CurrLoopCalibResultReady,
+ * 校准引擎返回 DONE/ERROR 时置 g_CurrLoopCalibResultReady_M2,
  * 由主循环下一轮调用 CalibM2_OnDone() 处理.
  * ==================================================================== */
 void CalibM2_OnTIM3_1ms(void)
 {
-    if (!g_CurrLoopCalibInProgress) return;
+    if (!g_CurrLoopCalibInProgress_M2) return;
     CurrLoopCalib_State_t st = CurrLoopCalib_Run(&s_calibHandle);
     if (st == CURR_CALIB_STATE_DONE || st == CURR_CALIB_STATE_ERROR)
-        g_CurrLoopCalibResultReady = 1;
+        g_CurrLoopCalibResultReady_M2 = 1;
 }
 
 /* ====================================================================
@@ -228,4 +231,7 @@ void CalibM2_FillVofa(void)
     g_VofaFrame.ch[4] = res.rs_ohm;                   /* I4: Rs Ω */
     g_VofaFrame.ch[5] = res.ls_henry * 1000.0f;       /* I5: Ls mH */
     g_VofaFrame.ch[6] = 0.0f;
+    g_VofaFrame.ch[7] = 0.0f;
+    g_VofaFrame.ch[8] = 0.0f;
+    g_VofaFrame.ch[9] = 0.0f;
 }
