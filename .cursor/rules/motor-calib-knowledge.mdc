@@ -110,6 +110,14 @@ alwaysApply: false
     3. 轮询须先等 BUSY(1) 确认真正开始 (2s 超时)，再等 DONE(3)，否则会误读旧 DONE
   - **验证方法**: 连续触发 `g_DoKth71Calib_M2=1` 多次, 每次 VOFA I0 应 3(POLLING)→4(DONE), PWM LED 闪烁
 - **VOFA 调试**: `g_VofaSrc = VOFA_SRC_KTH71_CALIB`，I0=DbgStep(4=DONE/6=TIMEOUT)
+- **关键陷阱 — MTP 烧写 0x16 残留 REG_CAL=1 (2026-02-24 厂家确认, 已修复)**:
+  - **现象**: ANLC + 零点标定全部完成后, 偶发上电时 PWM 引脚闪烁、速度逐渐收敛 (芯片自动重新校准)
+  - **根因**: `KTH71_WriteRegToMTP()` 烧所有 volatile 寄存器到 MTP; 如果 0x16 (ANLC_CTRL) 残留 0x18 (REG_CAL=1), 则每次上电芯片从 MTP 加载 REG_CAL=1 → 自动触发 ANLC
+  - **厂家确认**: "0X16寄存器不会自动恢复为0X08" — Lock 命令 **不会** 恢复 0x16 到 MTP 值; `calib_end()` SPI 读失败时静默跳过, 0x16 维持 0x18
+  - **解决**: 任何 `WriteRegToMTP` 调用前, 显式 `KTH71_SpiGap()` + `KTH71_UnlockReg()` + `KTH71_SpiGap()` + `KTH71_WriteReg(0x16, 0x08)`, 确保 ANLC_EN=1 且 REG_CAL=0。ANLC 校准 (`KTH71_CalibRunBlocking`) 和零点标定 (`ZeroCalib_RunBlocking`) 末尾均已加入。
+  - **真正根因 (2026-02-24 实测确认)**: `zero_calib.c` 外部调用方连续调用多个 kth71xx API **缺少 SPI 帧间延时 (>150ns)**。kth71xx.c 内部每次操作间都有 `spi_gap_150ns()`，但外部调用方不知道此约束 → `WriteReg(0x16, 0x08)` 被芯片静默丢弃
+  - **修复**: `spi_gap_150ns()` 从 kth71xx.c static 提升为 kth71xx.h 公开 `KTH71_SpiGap()`，外部文件每次连续 SPI 操作间必须调用
+  - **原则**: 任何 `WriteRegToMTP` 调用前, 必须显式设定所有关键寄存器的期望值, 不依赖之前操作的隐式状态; 且每次 SPI 操作间须插入 `KTH71_SpiGap()`
 
 ### 9. VOFA 引擎架构决策
 - **问题**: 各模块分散管理 DMA 发送，while(1) 被 HAL_Delay 阻塞时无波形
@@ -149,3 +157,4 @@ alwaysApply: false
     - **根因**: KTH7111 ANLC 后 INL ≈ ±0.2° 机械, × 100pp = ±20° 电角度; 局部可超 ±90° 导致力矩反向
     - **结论**: 100pp 步进电机超出 KTH7111 编码器精度能力。M2 (50pp, ±10° 电角度) 正常
     - **备选方案** (未实施): ① 开环换向 (Trinamic 架构) ② 软件 INL 补偿表 ③ 更高精度编码器
+21. **KTH7111 SPI 帧间时序 >150ns (2026-02-24 实测确认)**: kth71xx.c 内部已有 `spi_gap_150ns()`，但外部调用方 (zero_calib.c, main.c) 连续调用多个 kth71xx API 时也必须在每次调用间插入 `KTH71_SpiGap()`。违反时芯片**静默丢弃 WriteReg**，不报错。`KTH71_SpiGap()` 已提升到 kth71xx.h 公开

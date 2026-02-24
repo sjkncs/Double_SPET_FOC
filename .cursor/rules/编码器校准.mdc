@@ -37,28 +37,14 @@ alwaysApply: false
 | 条件 | 要求 | 检查方法 |
 |------|------|---------|
 | 供电 | 12V 标称, 实测 ~11.9V | Live Watch `g_Vbus_mV` |
-| 控制模式 | 开环 (`g_M1_CtrlMode = 0` / `g_M2_CtrlMode = 0`) | Live Watch |
 | 电流环 | **已校准** (PI 参数有效) | `g_M1_PI_d.kp` / `g_M2_PI_d.kp` 非默认值 |
-| 力矩指令 | `g_M1_Iq_Ref_mA` / `g_M2_Iq_Ref_mA` 有值 | 保证转起来 |
-| 转速指令 | 电机旋转中 | 见下方默认值 |
 
-#### 默认参数差异
-
-| 参数 | M1 | M2 |
-|------|-----|-----|
-| 开环力矩 | `g_M1_Iq_Ref_mA` = 50 mA | `g_M2_Iq_Ref_mA` = 100 mA |
-| 开环转速 | `g_M1_RPM_Cmd` = 400 RPM | `g_M2_RPM_Cmd` = 0 (需手动设) |
-| ANLC 校准转速来源 | `g_M1_RPM_Cmd` (默认 400) | `KTH71_CALIB_RPM` 宏 (800) |
-
-> **M2 注意**: M2 校准转速由 `KTH71_CALIB_RPM` 宏决定（代码自动设），与 `g_M2_RPM_Cmd` 无关。
-> **M1 注意**: 800 RPM 对高极对数 + 高电感电机可能丢步，M1 校准转速直接用 `g_M1_RPM_Cmd`。
+> **M2**: 触发 `g_DoKth71Calib_M2=1` 后代码全自动 — 自动切开环、用 `g_M2_Iq_Ref_mA`(默认100mA) 作力矩、用 `KTH71_CALIB_RPM`(800RPM) 作校准转速，与 `g_M2_RPM_Cmd` 无关。
+> **M1**: 触发 `g_DoKth71Calib_M1=1` 后代码全自动 — 自动切开环、用 `g_M1_Iq_Ref_mA`(默认50mA) 作力矩、校准转速取 `g_M1_RPM_Cmd`(默认400RPM，因800RPM对高电感电机丢步)。
 
 ### 操作步骤
 
-1. **确认电机正在旋转**: 开环模式下应正常旋转
-   - 观察 `g_Enc1_SpeedFilt` / `g_Enc2_SpeedFilt` ≈ 预期转速（符号取决于编码器方向）
-   - 如果电机不转，检查对应 Iq_Ref_mA 和 RPM_Cmd
-2. **触发校准**:
+1. **直接触发校准** (无需手动设任何参数，代码自动接管):
    - M1: Live Watch 置 `g_DoKth71Calib_M1 = 1`
    - M2: Live Watch 置 `g_DoKth71Calib_M2 = 1`
 3. **自动过程** (~15-20 秒):
@@ -67,7 +53,8 @@ alwaysApply: false
    - 芯片 PWM 引脚 3.8Hz 闪烁 = BUSY
    - 闪烁停止 = 校准完成或失败
 4. **校准完成**: VOFA 切到 `VOFA_SRC_IDLE`（停止发送，保留结果）
-5. **恢复发送**: 需手动置 `g_VofaSrc = 1`(`VOFA_SRC_NORMAL`)
+5. **自动 MTP 固化**: ANLC 成功后代码自动写 0x16=0x08 + 烧 MTP，无需零点标定即可掉电保存
+6. **恢复发送**: 需手动置 `g_VofaSrc = 1`(`VOFA_SRC_NORMAL`)
 
 ### VOFA 通道 (校准期间)
 
@@ -165,6 +152,7 @@ RD=0: new_zero = old_zero + enc_angle
 | 标定后闭环振荡 | 零点偏差过大 | 重新标定，确认 ANLC 已校准 |
 | 标定后正负转速反 | 编码器方向与 FOC 坐标系相反 | 软件取反速度或交换 A/B |
 | `g_ZeroCalibAngle_M1` / `g_ZeroCalibAngle_M2` 为 0 | SPI 读角度失败 | 检查对应 SPI/CS 接线 |
+| 上电后 PWM 引脚闪烁 (自动重校准) | 0x16 被 MTP 烧入 0x18 (REG_CAL=1) | 已修复: ANLC 和零点标定均在 MTP 前显式写 0x16=0x08 |
 
 ---
 
@@ -190,6 +178,7 @@ RD=0: new_zero = old_zero + enc_angle
 │  M1: g_DoKth71Calib_M1 = 1                                   │
 │  M2: g_DoKth71Calib_M2 = 1                                   │
 │  → 芯片 PWM 闪烁 → I0=4(DONE)                                │
+│  → 成功后自动写 0x16=0x08 + MTP 固化                          │
 │  → VOFA 停在 IDLE                                             │
 │                                                              │
 │  Step 3: 电角度零点标定                                        │

@@ -66,14 +66,23 @@ uint8_t ZeroCalib_RunBlocking(const KTH7111_Hw_t *hw,
 
     uint16_t old_zero = *mc->p_zero_calib_angle;   /* 用 C 变量, 不读寄存器 */
 
+    KTH71_SpiGap();
     uint16_t enc_angle;
     uint8_t ok = KTH71_ReadAngle(hw, &enc_angle, NULL);
+
     if (ok) {
         uint16_t new_zero = rd ? (uint16_t)(old_zero - enc_angle)
                                 : (uint16_t)(old_zero + enc_angle);
         *mc->p_zero_calib_angle = new_zero;
         KTH71_WriteZero(hw, new_zero);
-        KTH71_WriteRegToMTP(hw);            /* 固化到 MTP, 掉电不丢失 (≥400ms) */
+
+        KTH71_SpiGap();
+        KTH71_UnlockReg(hw);
+        KTH71_SpiGap();
+        KTH71_WriteReg(hw, KTH71_REG_ANLC_CTRL, 0x08);
+
+        KTH71_SpiGap();
+        KTH71_WriteRegToMTP(hw);
     }
 
     g_Kth71CalibActive = 0;

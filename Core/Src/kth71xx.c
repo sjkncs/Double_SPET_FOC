@@ -3,6 +3,17 @@
  * @brief   KTH7111 磁编码器驱动 — LL SPI · 寄存器访问 · 非线性自校准 (开环 600 rpm)
  *
  * 数据手册 KTH7111_datasheet_0.9.pdf, 接口说明见 kth71xx.h
+ *
+ * !! 外部调用方注意 !!
+ *   1. 连续调用本模块 API (ReadReg/WriteReg/UnlockReg/WriteRegToMTP 等)
+ *      之间 **必须** 插入 KTH71_SpiGap() (>150ns, datasheet §6.4/6.5)。
+ *      本文件内部已处理帧间延时, 但跨 API 调用的间隔由调用方负责。
+ *      违反时芯片静默丢弃 WriteReg, 不报错, 不返回异常。
+ *
+ *   2. 任何 WriteRegToMTP 调用前, 必须显式写 0x16 (ANLC_CTRL) = 0x08,
+ *      确保 REG_CAL=0 + ANLC_EN=1。MTP 烧写会把所有 volatile 寄存器固化,
+ *      若 0x16 残留 0x18 (REG_CAL=1), 每次上电芯片会自动触发 ANLC 校准。
+ *      Lock 命令 **不会** 恢复 0x16 到 MTP 值 (厂家 2026-02-24 确认)。
  */
 
 #include "kth71xx.h"
@@ -60,12 +71,8 @@ static uint8_t crc8_verify(const uint8_t *frame, uint8_t len)
  * 如需彻底消除, 可在 spi_tx/spi_tx_then_rx 前后加 __disable_irq/__enable_irq。
  * ==================================================================== */
 
-/** SPI 帧间延时: 保证 > 150ns (KTH7111 datasheet §6.4/6.5)
- *  volatile 循环 5 迭代 @170MHz: 每迭代 ~6 cycles → 30 cycles ≈ 176ns */
-static inline void spi_gap_150ns(void)
-{
-    for (volatile uint32_t i = 0; i < 5; i++) {}
-}
+/** SPI 帧间延时别名 — 实现已移至 kth71xx.h (KTH71_SpiGap) */
+#define spi_gap_150ns() KTH71_SpiGap()
 
 /** 纯发送: SPE使能 → CS↓ → TX → CS↑
  *  关键: KTH7111 在 CS↓+SCK_idle 时会提前准备数据, 必须 SPE 先使能再拉 CS */
@@ -390,6 +397,21 @@ uint8_t KTH71_CalibRunBlocking(const KTH7111_Hw_t *hw,
         g_CalibDbgStep = KTH71_CALIB_DBG_SPI_FAIL;
     }
 
+    /* ---- 防御性清 0x16 + MTP 固化 ----
+     * calib_end() 依赖 ReadReg 成功才能清 REG_CAL, 若 SPI 读失败会静默跳过,
+     * 导致 0x16 残留 0x18 (REG_CAL=1)。此处无条件写 0x08。
+     * ANLC 成功时同步烧 MTP, 用户无需再执行零点标定即可掉电保存。 */
+    KTH71_SpiGap();
+    KTH71_UnlockReg(hw);
+    KTH71_SpiGap();
+    KTH71_WriteReg(hw, KTH71_REG_ANLC_CTRL, 0x08);
+
+    if (result) {
+        KTH71_SpiGap();
+        KTH71_WriteRegToMTP(hw);
+    }
+
+    KTH71_SpiGap();
     KTH71_LockReg(hw);
 
     /* ---- 阶段 4: 减速停机 ----

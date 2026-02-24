@@ -1,8 +1,8 @@
-../Core/Src/stm32g4xx_it.c:483:13:M1_ControlLoop	65
-../Core/Src/stm32g4xx_it.c:692:13:M2_ControlLoop	61
-../Core/Src/stm32g4xx_it.c:903:20:M1_UpdateElecAngle	9
-../Core/Src/stm32g4xx_it.c:930:20:M2_UpdateElecAngle	8
-../Core/Src/stm32g4xx_it.c:958:20:StepCap_Record	9
+../Core/Src/stm32g4xx_it.c:473:13:M1_ControlLoop	65
+../Core/Src/stm32g4xx_it.c:682:13:M2_ControlLoop	61
+../Core/Src/stm32g4xx_it.c:893:20:M1_UpdateElecAngle	9
+../Core/Src/stm32g4xx_it.c:920:20:M2_UpdateElecAngle	8
+../Core/Src/stm32g4xx_it.c:948:20:StepCap_Record	9
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_ll_hrtim.h:11017:22:LL_HRTIM_ClearFlag_UPDATE	2
 ../Core/Src/stm32g4xx_it.c:81:6:NMI_Handler	1
 ../Core/Src/stm32g4xx_it.c:96:6:HardFault_Handler	1
@@ -15,7 +15,7 @@
 ../Core/Src/stm32g4xx_it.c:195:6:SysTick_Handler	1
 ../Core/Src/stm32g4xx_it.c:216:6:DMA1_Channel1_IRQHandler	2
 ../Core/Src/stm32g4xx_it.c:233:6:ADC1_2_IRQHandler	68
-../Core/Src/stm32g4xx_it.c:360:6:TIM3_IRQHandler	7
-../Core/Src/stm32g4xx_it.c:430:6:TIM4_IRQHandler	1
-../Core/Src/stm32g4xx_it.c:444:6:HRTIM1_Master_IRQHandler	1
-../Core/Src/stm32g4xx_it.c:462:6:HRTIM1_FLT_IRQHandler	1
+../Core/Src/stm32g4xx_it.c:350:6:TIM3_IRQHandler	7
+../Core/Src/stm32g4xx_it.c:420:6:TIM4_IRQHandler	1
+../Core/Src/stm32g4xx_it.c:434:6:HRTIM1_Master_IRQHandler	1
+../Core/Src/stm32g4xx_it.c:452:6:HRTIM1_FLT_IRQHandler	1
