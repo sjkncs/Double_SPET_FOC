@@ -17,7 +17,7 @@ alwaysApply: false
 - 电角度零点标定 — g_ZeroCalibAngle_M1/M2 独立
 - KTH71 ANLC 非线性校准 — g_DoKth71Calib_M1/M2
 - VOFA 引擎 (TIM4) — 7 种数据源含 M1 校准 + 随动
-- dq 阶跃响应录制/回放 — g_StepCapMotor 选 M1/M2, 双轴顺序采集
+- dq 阶跃响应录制/回放 — g_StepCapArm_M1/M2 一键触发, 自动选电机
 - 逆Park延迟补偿 — angle+speed_dpp, 对称
 - Vq 饱和诊断 — g_M1/M2_VqSaturated
 - 速度/位置/步距角闭环 — 全模式 M1/M2 对称

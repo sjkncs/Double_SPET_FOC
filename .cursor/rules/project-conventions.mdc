@@ -3,7 +3,7 @@ description: Gemini-FOC 项目编码约定与架构概览
 alwaysApply: true
 ---
 
-# Gemini-FOC — 双轴步进伺服 FOC 控制器
+# BiStep-FOC — 双轴步进伺服 FOC 控制器
 
 STM32G474 + 双电机 FOC，将两相混合式步进电机变成闭环伺服。
 4 路独立半桥 + 双电阻采样 + KTH7111 磁编码器，纯软件 FOC，无需专用电机驱动芯片。
@@ -95,7 +95,7 @@ STM32G474 + 双电机 FOC，将两相混合式步进电机变成闭环伺服。
 ### VOFA 电机选择
 - `g_VofaMotorSel`: 0=M2(默认), 1=M1 — NORMAL 模式下显示哪台电机
 - `g_Kth71CalibMotor`: 0=M2, 1=M1 — KTH71 校准时 VOFA 填哪台电机数据
-- `g_StepCapMotor`: 0=M2, 1=M1 — 阶跃录制/回放选择电机
+- `g_StepCapMotor`: 0=M2, 1=M1 — 阶跃录制/回放电机 (由 `g_StepCapArm_M1/M2` 自动设置)
 
 ### 使用方法
 1. 进入某模式前: `g_VofaSrc = VOFA_SRC_xxx;`

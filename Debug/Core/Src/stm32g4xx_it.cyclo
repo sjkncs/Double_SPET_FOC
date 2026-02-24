@@ -1,8 +1,8 @@
 ../Core/Src/stm32g4xx_it.c:483:13:M1_ControlLoop	65
-../Core/Src/stm32g4xx_it.c:692:13:M2_ControlLoop	65
-../Core/Src/stm32g4xx_it.c:906:20:M1_UpdateElecAngle	9
-../Core/Src/stm32g4xx_it.c:933:20:M2_UpdateElecAngle	8
-../Core/Src/stm32g4xx_it.c:961:20:StepCap_Record	9
+../Core/Src/stm32g4xx_it.c:692:13:M2_ControlLoop	61
+../Core/Src/stm32g4xx_it.c:903:20:M1_UpdateElecAngle	9
+../Core/Src/stm32g4xx_it.c:930:20:M2_UpdateElecAngle	8
+../Core/Src/stm32g4xx_it.c:958:20:StepCap_Record	9
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_ll_hrtim.h:11017:22:LL_HRTIM_ClearFlag_UPDATE	2
 ../Core/Src/stm32g4xx_it.c:81:6:NMI_Handler	1
 ../Core/Src/stm32g4xx_it.c:96:6:HardFault_Handler	1

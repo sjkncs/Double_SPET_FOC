@@ -37,14 +37,14 @@
 
 1. **先校准电角度零点**  
    保证 `g_M2_ElecAngleOffset` 正确（零点校准流程跑通后再做下面步骤）。  
-   阶跃录制在 **g_StepCapArm=1** 时会先自动 Id 吸 1s 对齐零点，再开始 d/q 阶跃录制。
+   阶跃录制在 **g_StepCapArm_M1/M2=1** 时会先自动 Id 吸 1s 对齐零点，再开始 d/q 阶跃录制。
 
 2. **固定测试条件**  
    - M2 开环或速度环给固定转速（如 0 或低速），避免速度大范围变化。  
    - 机械上尽量固定同一初始角度再做阶跃，便于复现。
 
 3. **用阶跃录制看 d/q 响应**  
-   - Live Watch：`g_StepCapTarget_mA = 200`（或你关心的电流），`g_StepCapArm = 1`。  
+   - Live Watch：`g_StepCapTarget_mA = 200`（或你关心的电流），`g_StepCapArm_M1 = 1`（M1）或 `g_StepCapArm_M2 = 1`（M2）。  
    - 流程：Phase0 录 d 轴阶跃 → 回放 → Phase1 录 q 轴阶跃 → 回放 → 暂停（见 `main.c` 533–589 行）。  
    - VOFA 通道：ch0=Id_ref, ch1=Iq_ref, ch2=Id_fbk, ch3=Iq_fbk；ch5=0 表示 d 轴，1 表示 q 轴。
 
@@ -91,7 +91,7 @@
 | ch4 (I4)  | **样本序号** (0~127) | 每点 = 1 个控制周期 (≈58.8µs @17kHz)，**阶跃发生在 10** |
 | ch5 (I5)  | phase + **发送翻转方波** | 0/1 + 100×翻转 → 方波，**每半周期 = 1 次发送 ≈1ms**，便于在波形上数时间/周期 |
 
-- 启动：Live Watch 设 `g_StepCapTarget_mA`，置 `g_StepCapArm = 1`（会先 Id 吸 1s 再录）。  
+- 启动：Live Watch 设 `g_StepCapTarget_mA`，置 `g_StepCapArm_M1 = 1`（M1）或 `g_StepCapArm_M2 = 1`（M2），会先 Id 吸 1s 再录。  
 - 代码位置：阶跃逻辑 `main.c` 534–597 行；ISR 内录制 `stm32g4xx_it.c` 288–317 行。
 
 ---

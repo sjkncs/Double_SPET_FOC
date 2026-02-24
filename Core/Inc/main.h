@@ -452,7 +452,7 @@ extern volatile float g_Dbg_M1_Pos_pTerm;
 extern volatile float g_Dbg_M1_Pos_dTerm;
 
 /* ---- 电流环阶跃响应录制 (ISR采集→while回放→VOFA+) ----
- * 流程: g_StepCapTarget_mA + g_StepCapArm=1 → Id吸1s → Phase0(d轴)录→回放 → Phase1(q轴)录→回放→暂停
+ * 流程: g_StepCapTarget_mA + g_StepCapArm_M1/M2=1 → 自动选电机 → Id吸1s → Phase0(d轴)录→回放 → Phase1(q轴)录→回放→暂停
  * VOFA 回放时: ch0=Id_ref, ch1=Iq_ref, ch2=Id_fbk, ch3=Iq_fbk,
  *             ch4=样本序号(0~127, 阶跃发生在 STEP_CAP_PRE=10, 即第10个控制周期),
  *             ch5=phase(0/1)+100×发送翻转(方波, 每半周期=1次发送≈1ms, 便于数周期).
@@ -469,8 +469,9 @@ typedef struct {
 
 /* 状态: 0=空闲, 1=录制中, 2=回放中, 3=暂停(两轴均完成) */
 extern volatile uint8_t  g_StepCapState;
-extern volatile uint8_t  g_StepCapArm;       /* Live Watch 置1: 启动录制 */
-extern volatile uint8_t  g_StepCapMotor;     /* 0=M2, 1=M1 (Live Watch 选择录制轴) */
+extern volatile uint8_t  g_StepCapArm_M1;    /* Live Watch 置1: 启动 M1 录制 (自动设 g_StepCapMotor=1) */
+extern volatile uint8_t  g_StepCapArm_M2;    /* Live Watch 置1: 启动 M2 录制 (自动设 g_StepCapMotor=0) */
+extern volatile uint8_t  g_StepCapMotor;     /* 0=M2, 1=M1 (由 Arm 自动设置, ISR/回放内部使用) */
 extern volatile uint8_t  g_StepCapPhase;     /* 0=d轴测试, 1=q轴测试 */
 extern volatile uint16_t g_StepCapIdx;       /* 当前写入位置 */
 extern volatile int16_t  g_StepCapTarget_mA; /* 阶跃目标电流 mA (Live Watch设置) */

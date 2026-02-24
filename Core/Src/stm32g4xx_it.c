@@ -250,8 +250,6 @@ void ADC1_2_IRQHandler(void)
   /* ---- FOC电流环 (采样 → Park → PI → 逆Park → PWM) ---- */
   FOC_GetPhaseCurrent();
 
-  /* 进入中断到FOC_GetPhaseCurrent执行完毕耗时0.8us  - */
-
   /* ---- 编码器 SPI (校准期间暂停, 避免 SPI 总线竞争) ---- */
   if (!g_Kth71CalibActive)
   {
@@ -269,7 +267,6 @@ void ADC1_2_IRQHandler(void)
   int16_t m1_speed_dpp = CalcSpeedDpp(&m1_elec_prev, g_M1_ElecAngle_Q15);
   int16_t m2_speed_dpp = CalcSpeedDpp(&m2_elec_prev, g_M2_ElecAngle_Q15);
 
-  /* 全开环耗时0.8us  - */
 
   /* CORDIC: Park 变换用当前电角度 */
   SinCos_Q15_t sc_m1, sc_m2;
@@ -277,13 +274,11 @@ void ADC1_2_IRQHandler(void)
   FOC_CalcSinCos(g_M2_ElecAngle_Q15, &sc_m2);
 //  g_DbgSinCos_M2 = sc_m2;  /* DEBUG: Live Watch查看cos/sin是否正确 */
 
-  /* CORDIC耗时0.75us  - */
 
   /* Park变换: αβ→DQ (2相步进电机无需Clarke, Iα=Ia, Iβ=Ib) */
   FOC_ParkTransform(&sc_m1, &g_M1Current, &g_M1_Idq);
   FOC_ParkTransform(&sc_m2, &g_M2Current, &g_M2_Idq);
 
-  /* Park耗时0.8us  - */
 
   /* 电流环阶跃响应录制 (state==1 时采集, 录满后 state→2 触发回放) */
   StepCap_Record();
@@ -306,7 +301,6 @@ void ADC1_2_IRQHandler(void)
       g_M2_Vdq.q = FOC_PI_Run(&g_M2_PI_q, g_M2_Idq_Ref.q, g_M2_Idq.q);
   }
 
-  /* 电流闭环耗时2.3us  - */
 
   /* dq 前馈解耦 (开环自动跳过) */
   FOC_DecoupleFF(&g_M1_Vdq, m1_speed_dpp, &g_M1_Idq, g_M1_wLs_factor, g_M1_CtrlMode);
@@ -332,19 +326,15 @@ void ADC1_2_IRQHandler(void)
       g_CalibAccCnt_M1++;
   }
 
-  /* 未触发耗时0.5us  - */
 
   /* 逆Park + 延迟补偿: 电角度前推 1 个 ISR 周期补偿 ADC→PWM 延迟 */
   FOC_InvParkWithComp(g_M1_ElecAngle_Q15, m1_speed_dpp, &g_M1_Vdq, &g_M1_Vab);
   FOC_InvParkWithComp(g_M2_ElecAngle_Q15, m2_speed_dpp, &g_M2_Vdq, &g_M2_Vab);
 
-  /* 逆Park变换 耗时0.8us  - */
 
   /* αβ电压 → PWM占空比 */
   FOC_SetPhasePWM(M1_TIMER_PHASE_A, M1_TIMER_PHASE_B, &g_M1_Vab);
   FOC_SetPhasePWM(M2_TIMER_PHASE_A, M2_TIMER_PHASE_B, &g_M2_Vab);
-
-  /* αβ电压 → PWM占空比 耗时1us  - */
 
   /* 清除3个ADC的JEOS标志 (必须在读取JDR之后) */
   LL_ADC_ClearFlag_JEOS(ADC1);
@@ -797,9 +787,6 @@ static void M2_ControlLoop(int16_t d2)
 
         float i_term = g_M2_StepAnglePD.integral;
         if (g_M2_StepAnglePD.ki != 0.0f) {
-            if ((i_term > 0.0f && pos_err < 0) ||
-                (i_term < 0.0f && pos_err > 0))
-                i_term = 0.0f;
             i_term += g_M2_StepAnglePD.ki * (float)pos_err;
             if (i_term >  g_M2_StepAnglePD.integ_limit) i_term =  g_M2_StepAnglePD.integ_limit;
             if (i_term < -g_M2_StepAnglePD.integ_limit) i_term = -g_M2_StepAnglePD.integ_limit;

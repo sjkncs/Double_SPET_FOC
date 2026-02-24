@@ -177,8 +177,9 @@ volatile uint8_t  g_FlashParamsLoaded = 0;
  * §7  调试 & VOFA — 阶跃录制 / ISR→VOFA 中间变量 / DMA 帧
  * ================================================================ */
 volatile uint8_t  g_StepCapState = 0;
-volatile uint8_t  g_StepCapArm   = 0;
-volatile uint8_t  g_StepCapMotor = 1;
+volatile uint8_t  g_StepCapArm_M1 = 0;
+volatile uint8_t  g_StepCapArm_M2 = 0;
+volatile uint8_t  g_StepCapMotor  = 1;
 volatile uint8_t  g_StepCapPhase = 0;
 volatile uint16_t g_StepCapIdx   = 0;
 volatile int16_t  g_StepCapTarget_mA = 200;

@@ -1570,7 +1570,7 @@ static void TIM3_StartSpeedLoop(void)
 static void M1_UpdateCtrlRef(void)
 {
     if (g_M1_CtrlMode == MODE_OPEN_LOOP
-        && (g_StepCapState == 0 || g_StepCapMotor != 1)
+        && (g_StepCapState == 0 || g_StepCapState == 3 || g_StepCapMotor != 1)
         && !g_CurrLoopCalibInProgress_M1)
     {
         g_M1_Idq_Ref.d = MA_TO_Q15(0);
@@ -1590,7 +1590,7 @@ static void M1_UpdateCtrlRef(void)
 static void M2_UpdateCtrlRef(void)
 {
     if (g_M2_CtrlMode == MODE_OPEN_LOOP
-        && (g_StepCapState == 0 || g_StepCapMotor != 2)
+        && (g_StepCapState == 0 || g_StepCapState == 3 || g_StepCapMotor != 0)
         && !g_CurrLoopCalibInProgress_M2)
     {
         g_M2_Idq_Ref.d = MA_TO_Q15(0);
@@ -1907,7 +1907,7 @@ static void FlashParams_EraseAndReset(void)
 }
 
 /* ---- 电流环 dq 双轴阶跃响应测试 ----
- * 流程: g_StepCapArm=1 → Id 吸合 1s 对齐零点 →
+ * 流程: g_StepCapArm_M1/M2=1 → 自动选电机 → Id 吸合 1s 对齐零点 →
  *       Phase0(d轴) 录制→回放 → Phase1(q轴) 录制→回放 → 暂停
  * VOFA 通道: ch0=Id_ref, ch1=Iq_ref, ch2=Id_fbk, ch3=Iq_fbk,
  *           ch4=样本序号(阶跃在第10点), ch5=phase + 100×发送翻转方波 */
@@ -1915,13 +1915,24 @@ static void FlashParams_EraseAndReset(void)
 /**
  * @brief  阶跃测试启动: Id 吸合对齐 → 清 PI → 启动 ISR 录制
  *
- * 仅在 g_StepCapArm=1 且空闲(0)/暂停(3) 时执行, 否则跳过.
+ * 仅在 g_StepCapArm_M1/M2=1 且空闲(0)/暂停(3) 时执行, 否则跳过.
+ * Arm 变量自动设置 g_StepCapMotor, 无需手动选电机.
+ * 若 M1/M2 同时置 1, M1 优先 (M2 的 arm 保留, 下次进入).
  */
 static void StepCap_ArmAndAlign(void)
 {
-    if (!(g_StepCapArm && (g_StepCapState == 0 || g_StepCapState == 3)))
+    if (g_StepCapState != 0 && g_StepCapState != 3)
         return;
-    g_StepCapArm = 0;
+
+    if (g_StepCapArm_M1) {
+        g_StepCapArm_M1 = 0;
+        g_StepCapMotor  = 1;
+    } else if (g_StepCapArm_M2) {
+        g_StepCapArm_M2 = 0;
+        g_StepCapMotor  = 0;
+    } else {
+        return;
+    }
 
     if (g_StepCapMotor == 0) {
         /* M2: Id 吸合 1s 对齐零点 */

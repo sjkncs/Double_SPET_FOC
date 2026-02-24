@@ -6,8 +6,8 @@
 ../Core/Src/main.c:1554:13:TIM3_StartSpeedLoop	0	static
 ../Core/Src/main.c:1612:13:M1_ClampParams	0	static
 ../Core/Src/main.c:1666:13:M2_ClampParams	0	static
-../Core/Src/main.c:1920:13:StepCap_ArmAndAlign	16	static
-../Core/Src/main.c:1971:13:StepCap_Playback	8	static
+../Core/Src/main.c:1922:13:StepCap_ArmAndAlign	16	static
+../Core/Src/main.c:1982:13:StepCap_Playback	8	static
 ../Core/Src/main.c:1435:13:MX_GPIO_Init	64	static
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_ll_hrtim.h:3755:22:LL_HRTIM_TIM_SetPrescaler	0	static,ignoring_inline_asm
 ../Drivers/STM32G4xx_HAL_Driver/Inc/stm32g4xx_ll_hrtim.h:3813:22:LL_HRTIM_TIM_SetCounterMode	0	static,ignoring_inline_asm
@@ -65,7 +65,7 @@
 ../Core/Src/main.c:1835:13:Main_RunZeroCalib_M1	32	static
 ../Core/Src/main.c:1898:13:FlashParams_EraseAndReset	8	static
 ../Core/Src/main.c:1723:13:PollCalibTriggers	8	static
-../Core/Src/main.c:2006:6:Error_Handler	0	static,ignoring_inline_asm
+../Core/Src/main.c:2017:6:Error_Handler	0	static,ignoring_inline_asm
 ../Core/Src/main.c:268:13:MX_ADC1_Init	200	static,ignoring_inline_asm
 ../Core/Src/main.c:390:13:MX_ADC2_Init	184	static,ignoring_inline_asm
 ../Core/Src/main.c:508:13:MX_ADC3_Init	208	static

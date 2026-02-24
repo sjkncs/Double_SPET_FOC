@@ -16,7 +16,7 @@ alwaysApply: false
 - 控制模式: `g_M2_CtrlMode`
 - PI 参数: `g_M2_PI_d` / `g_M2_PI_q` / `g_M2_PI_Base`
 - Flash 状态: `g_FlashParamsLoaded` bit1
-- 阶跃电机选择: `g_StepCapMotor = 0`
+- 阶跃触发: `g_StepCapArm_M2 = 1` (自动选 M2)
 
 **M1 电机:**
 - 校准触发: `g_DoCurrLoopCalib_M1 = 1`
@@ -24,17 +24,15 @@ alwaysApply: false
 - 控制模式: `g_M1_CtrlMode`
 - PI 参数: `g_M1_PI_d` / `g_M1_PI_q` / `g_M1_PI_Base`
 - Flash 状态: `g_FlashParamsLoaded` bit0
-- 阶跃电机选择: `g_StepCapMotor = 1`
+- 阶跃触发: `g_StepCapArm_M1 = 1` (自动选 M1)
 
 ---
 
 ## 测试前提
 
 - **供电**: 12V 标称, 实测 ~11.9V (Live Watch `g_Vbus_mV`)
-- **控制模式**: 开环 (`g_M1_CtrlMode = 0` / `g_M2_CtrlMode = 0`)
-- **转速指令**: 0 (`g_M1_RPM_Cmd = 0` / `g_M2_RPM_Cmd = 0`)
-- **力矩指令**: 0 (`g_M1_Iq_Ref_mA = 0` / `g_M2_Iq_Ref_mA = 0`)
 - **VOFA+ 连接**: JustFloat 协议, 10 通道, 串口 USART1
+- CtrlMode / Iq_Ref_mA / RPM_Cmd **无需手动清零** — 校准平台自动接管
 
 ---
 
@@ -42,8 +40,9 @@ alwaysApply: false
 
 ### 操作步骤
 
-1. **确认初始状态**: 对应电机 CtrlMode=0, Iq_Ref_mA=0, RPM_Cmd=0
-2. **触发校准**: Live Watch 置 `g_DoCurrLoopCalib_M1 = 1` / `g_DoCurrLoopCalib_M2 = 1`
+1. **触发校准**: Live Watch 置 `g_DoCurrLoopCalib_M2 = 1`(M2) 或 `g_DoCurrLoopCalib_M1 = 1`(M1)
+   - CtrlMode / Iq_Ref_mA / RPM_Cmd **无需手动清零** — 校准平台自动接管 (CalibInProgress 阻止主循环覆写)
+   - 校准结束后电机会恢复校准前的运行状态 (如 Iq_Ref_mA=100 则恢复转动)
 3. **自动过程** (~3 秒):
    - VOFA 自动切换到 `VOFA_SRC_CURR_CALIB_M1` / `VOFA_SRC_CURR_CALIB_M2`
    - DC_RAMP → DC_SETTLE(300ms) → DC_MEASURE(200点) → AC_SETTLE(200ms) → AC_MEASURE(2000点) → RAMP_DOWN
@@ -92,17 +91,17 @@ g_M1_PI_Base.vbus_mv / g_M2_PI_Base.vbus_mv — 应等于当前 g_Vbus_mV
 ### 操作步骤
 
 1. **校准已完成** (上一步的 PI 参数已生效)
-2. **选择电机**: Live Watch 置 `g_StepCapMotor = 0`(M2) 或 `1`(M1)
-3. **设置阶跃幅度**: Live Watch 置 `g_StepCapTarget_mA = 200` (默认值, 可调)
-4. **触发测试**: Live Watch 置 `g_StepCapArm = 1`
-5. **自动过程**:
+2. **设置阶跃幅度**: Live Watch 置 `g_StepCapTarget_mA = 200` (默认值, 可调)
+3. **触发测试**: Live Watch 置 `g_StepCapArm_M1 = 1`(M1) 或 `g_StepCapArm_M2 = 1`(M2)
+   - 自动设置 `g_StepCapMotor`, 无需手动选电机
+4. **自动过程**:
    - 目标电机切开环, Id=300mA 吸合 1 秒对齐 d 轴零点
    - 释放吸合电流 → **50ms 延迟等电流归零** → 清 PI 积分
    - **Phase 0 (d 轴)**: ISR @17kHz 录制 128 点 → TIM4 @1kHz 回放到 VOFA
    - 释放 d 轴电流 → **50ms 延迟** → 清 PI 积分
    - **Phase 1 (q 轴)**: ISR 录制 128 点 → TIM4 回放到 VOFA
    - 两轴完成后 state=3 (暂停), VOFA 切到 IDLE（停止发送, 保留波形）
-6. **重复测试**: 直接再置 `g_StepCapArm = 1` (state=3 可重新启动)
+5. **重复测试**: 直接再置 `g_StepCapArm_M1/M2 = 1` (state=3 可重新启动)
 
 ### VOFA 通道 (回放期间)
 
@@ -153,7 +152,7 @@ M1: g_M1_PI_d.kp = <新值>    g_M1_PI_d.ki = <新值>
 M2: g_M2_PI_d.kp = <新值>    g_M2_PI_d.ki = <新值>
     g_M2_PI_q.kp = <新值>    g_M2_PI_q.ki = <新值>
 ```
-改完后再次 `g_StepCapArm = 1` 观察阶跃响应, 迭代调优。
+改完后再次 `g_StepCapArm_M1/M2 = 1` 观察阶跃响应, 迭代调优。
 注意: 手动修改的参数**不会自动保存到 Flash**, 需要重新触发校准或手动调用。
 
 ---
@@ -175,21 +174,17 @@ M2: g_M2_PI_d.kp = <新值>    g_M2_PI_d.ki = <新值>
 
 ```
 ┌─ 校准 ─────────────────────────────────────────┐
-│ 1. g_M2_CtrlMode        = 0     (开环)         │
-│ 2. g_M2_RPM_Cmd         = 0     (静止)         │
-│ 3. g_M2_Iq_Ref_mA       = 0     (无力矩)       │
-│ 4. g_DoCurrLoopCalib_M2 = 1     (触发校准)      │
-│    → 等待 ~3s, VOFA I0 达到 7                   │
-│ 5. 记录: g_M2_PI_d.kp / ki                     │
+│ 1. g_DoCurrLoopCalib_M2 = 1     (触发校准)      │
+│    → 自动接管, 等待 ~3s, VOFA I0 达到 7         │
+│ 2. 记录: g_M2_PI_d.kp / ki                     │
 ├─ 阶跃 ─────────────────────────────────────────┤
-│ 6. g_StepCapMotor       = 0     (选 M2)         │
-│ 7. g_StepCapTarget_mA   = 200   (阶跃幅度)      │
-│ 8. g_StepCapArm         = 1     (触发阶跃测试)   │
-│    → 吸合 1s + d 轴录制回放 + q 轴录制回放       │
-│ 9. VOFA 观察阶跃波形, 评估 PI 品质              │
-│10. (可选) 调 PI → 再次 g_StepCapArm = 1 迭代    │
+│ 3. g_StepCapTarget_mA   = 200   (阶跃幅度)      │
+│ 4. g_StepCapArm_M2      = 1     (触发M2阶跃测试) │
+│    → 自动选M2 + 吸合1s + d/q轴录制回放           │
+│ 5. VOFA 观察阶跃波形, 评估 PI 品质              │
+│ 6. (可选) 调 PI → 再次 g_StepCapArm_M2=1 迭代   │
 ├─ 验证 ─────────────────────────────────────────┤
-│11. 断电重启, 确认 g_FlashParamsLoaded bit1=1     │
+│ 7. 断电重启, 确认 g_FlashParamsLoaded bit1=1     │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -197,20 +192,16 @@ M2: g_M2_PI_d.kp = <新值>    g_M2_PI_d.ki = <新值>
 
 ```
 ┌─ 校准 ─────────────────────────────────────────┐
-│ 1. g_M1_CtrlMode        = 0     (开环)         │
-│ 2. g_M1_RPM_Cmd         = 0     (静止)         │
-│ 3. g_M1_Iq_Ref_mA       = 0     (无力矩)       │
-│ 4. g_DoCurrLoopCalib_M1 = 1     (触发校准)      │
-│    → 等待 ~3s, VOFA I0 达到 7                   │
-│ 5. 记录: g_M1_PI_d.kp / ki                     │
+│ 1. g_DoCurrLoopCalib_M1 = 1     (触发校准)      │
+│    → 自动接管, 等待 ~3s, VOFA I0 达到 7         │
+│ 2. 记录: g_M1_PI_d.kp / ki                     │
 ├─ 阶跃 ─────────────────────────────────────────┤
-│ 6. g_StepCapMotor       = 1     (选 M1)         │
-│ 7. g_StepCapTarget_mA   = 200   (阶跃幅度)      │
-│ 8. g_StepCapArm         = 1     (触发阶跃测试)   │
-│    → 吸合 1s + d 轴录制回放 + q 轴录制回放       │
-│ 9. VOFA 观察阶跃波形, 评估 PI 品质              │
-│10. (可选) 调 PI → 再次 g_StepCapArm = 1 迭代    │
+│ 3. g_StepCapTarget_mA   = 200   (阶跃幅度)      │
+│ 4. g_StepCapArm_M1      = 1     (触发M1阶跃测试) │
+│    → 自动选M1 + 吸合1s + d/q轴录制回放           │
+│ 5. VOFA 观察阶跃波形, 评估 PI 品质              │
+│ 6. (可选) 调 PI → 再次 g_StepCapArm_M1=1 迭代   │
 ├─ 验证 ─────────────────────────────────────────┤
-│11. 断电重启, 确认 g_FlashParamsLoaded bit0=1     │
+│ 7. 断电重启, 确认 g_FlashParamsLoaded bit0=1     │
 └─────────────────────────────────────────────────┘
 ```
