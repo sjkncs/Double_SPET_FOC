@@ -31,10 +31,10 @@ volatile int16_t g_M2_ElecAngle_Q15 = 0;
 volatile int16_t g_M1_AngleDelta = 0;
 volatile int16_t g_M2_AngleDelta = 0;
 int16_t g_M1_AngleDelta_Target = 0;
-int16_t g_M2_AngleDelta_Target = 0;
+volatile int16_t g_M2_AngleDelta_Target = 0;
 int16_t g_M1_OpenLoop_Vq = 0;
 int16_t g_M2_OpenLoop_Vq = 0;
-int16_t g_M1_Iq_Ref_mA = 50;
+int16_t g_M1_Iq_Ref_mA = 100;
 int16_t g_M2_Iq_Ref_mA = 100;
 
 volatile DQ_Q15_t g_M1_Idq;
@@ -116,7 +116,7 @@ volatile int16_t g_M2_Id_Eff_mA = 0;
  * §5  M1 外环控制 (与 M2 镜像)
  * ================================================================ */
 volatile MotorCtrlMode_t g_M1_CtrlMode = MODE_OPEN_LOOP;
-volatile int16_t g_M1_RPM_Cmd = 400;
+volatile int16_t g_M1_RPM_Cmd = 0;
 int16_t g_M1_RpmRampRate = M1_RPM_RAMP_RATE;
 int16_t g_M1_Id_Hold_mA = 50;
 

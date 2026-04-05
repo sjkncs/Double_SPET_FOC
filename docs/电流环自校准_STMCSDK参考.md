@@ -69,7 +69,7 @@ Odrive 电机校准（`Firmware/MotorControl/motor.cpp`）也做 **R + L**，做
 
 ### 3.1 不移植 Profiler 时（只用公式）
 
-你已有 **Rs、Ls 标称值**（见 `docs/MOTOR_8HA0205-10_SPEC.md`：18.5Ω、5.3mH），可直接用 ST 的公式算“理论最优”PI，再换算到本工程的 Q15 定点：
+你已有 **Rs、Ls 标称值**（见 `docs/M2电机8HA0205-10规格说明.md`：18.5Ω、5.3mH），可直接用 ST 的公式算“理论最优”PI，再换算到本工程的 Q15 定点：
 
 - **Kp_si** = (2 / margin) × Ls × fs  
   - margin=5，Ls=5.3e-3 H，fs=17000 Hz → Kp_si ≈ 36 V/A。

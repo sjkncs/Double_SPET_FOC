@@ -167,7 +167,7 @@ typedef struct {
 #define M2_TIMER_PHASE_B  3U   /* Timer D — PA3 */
 
 /* ---- 电机参数 (切换电机时修改此区块) ----
- * 规格书与代码引用: 见 docs/MOTOR_8HA0205-10_SPEC.md
+ * 规格书与代码引用: 见 docs/M2电机8HA0205-10规格说明.md
  * 当前: RB 8HA0205-10 (2相PM步进电机, 20mm, NEMA08)
  *   步距角     1.8° (50极对)
  *   额定电压   DC 7.4V
@@ -182,7 +182,7 @@ typedef struct {
  *
  * PI极零对消比: ki/kp = Rs / (Ls_eff × fs) ≈ 18.5 / (28mH × 17000) ≈ 0.039
  *   (注: 当前 ki/kp=0.205 是按 Ls=5.3mH 标定, 阶跃响应为一阶无超调, 可用) */
-#define M1_POLE_PAIRS     12U   /* 0.9° 步距角: 400步/圈, 100极对 */
+#define M1_POLE_PAIRS     100U   /* 0.9° 步距角: 400步/圈, 100极对 */
 #define M2_POLE_PAIRS     50U    /* 1.8° 步距角: 200步/圈, 50极对 */
 #define M1_RAMP_DIV       2U     /* M1 开环斜坡分频: delta 每 N 个 ISR 才 ±1 (高电感需慢加速) */
 #define M1_ENC_DIR        (1)    /* M1 编码器方向: +1=同向, -1=反向 (已通过交换接线修正) */
@@ -268,7 +268,7 @@ extern volatile int16_t g_M2_ElecAngle_Q15;
 extern volatile int16_t g_M1_AngleDelta;
 extern volatile int16_t g_M2_AngleDelta;
 extern int16_t g_M1_AngleDelta_Target;  /* Live Watch设目标, 速度每ISR步进1 */
-extern int16_t g_M2_AngleDelta_Target;
+extern volatile int16_t g_M2_AngleDelta_Target;
 extern volatile int16_t g_M2_RPM_Cmd;  /* Live Watch: 设 RPM → 自动转 AngleDelta */
 extern int16_t g_M1_OpenLoop_Vq;
 extern int16_t g_M2_OpenLoop_Vq;
@@ -765,8 +765,9 @@ ALWAYS_INLINE void OpenLoop_IncAngle_Ref(void)
     g_M2_AngleDelta = cur;
 
     frac_acc += (int32_t)cur;
-    int32_t mech_inc = frac_acc / M2_POLE_PAIRS;
-    frac_acc -= mech_inc * M2_POLE_PAIRS;
+    int32_t pp = (int32_t)M2_POLE_PAIRS;
+    int32_t mech_inc = frac_acc / pp;
+    frac_acc -= mech_inc * pp;
     g_M2_StepAngle_Ref += mech_inc;
 }
 
@@ -780,8 +781,9 @@ ALWAYS_INLINE void M1_OpenLoop_IncAngle_Ref(void)
     g_M1_AngleDelta = cur;
 
     frac_acc += (int32_t)cur;
-    int32_t mech_inc = frac_acc / M1_POLE_PAIRS;
-    frac_acc -= mech_inc * M1_POLE_PAIRS;
+    int32_t pp = (int32_t)M1_POLE_PAIRS;
+    int32_t mech_inc = frac_acc / pp;
+    frac_acc -= mech_inc * pp;
     g_M1_StepAngle_Ref += mech_inc;
 }
 

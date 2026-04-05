@@ -26,6 +26,7 @@
 #include "calib_platform_m2.h"    /* CalibM2_OnTIM3_1ms: M2 电流环自校准 1ms 驱动 */
 #include "calib_platform_m1.h"    /* CalibM1_OnTIM3_1ms: M1 电流环自校准 1ms 驱动 */
 #include "vofa_engine.h"          /* Vofa_OnTIM4_1ms: VOFA 1kHz 自动发送 */
+#include "comm_protocol.h"        /* Comm_OnTIM4_1ms, Comm_OnIdleIRQ */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -228,6 +229,19 @@ void DMA1_Channel1_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles DMA1 channel2 global interrupt.
+  */
+void DMA1_Channel2_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel2_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel2_IRQn 0 */
+  /* USER CODE BEGIN DMA1_Channel2_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel2_IRQn 1 */
+}
+
+/**
   * @brief This function handles ADC1 and ADC2 global interrupt.
   */
 void ADC1_2_IRQHandler(void)
@@ -352,6 +366,9 @@ void TIM3_IRQHandler(void)
   /* USER CODE BEGIN TIM3_IRQn 0 */
   LL_TIM_ClearFlag_UPDATE(TIM3);
 
+  /* 通信看门狗 1ms 递增 (无条件, 不受校准/速度环影响) */
+  g_CommWatchdogMs++;
+
   /* 电流环自校准：每 1ms 执行一步 */
   CalibM2_OnTIM3_1ms();       /* M2 */
   CalibM1_OnTIM3_1ms();       /* M1 */
@@ -421,11 +438,33 @@ void TIM4_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM4_IRQn 0 */
   LL_TIM_ClearFlag_UPDATE(TIM4);
-  Vofa_OnTIM4_1ms();
+  Comm_OnTIM4_1ms();   /* 调度层: PROTOCOL→状态帧, VOFA→Vofa_OnTIM4_1ms() */
   /* USER CODE END TIM4_IRQn 0 */
   /* USER CODE BEGIN TIM4_IRQn 1 */
 
   /* USER CODE END TIM4_IRQn 1 */
+}
+
+/**
+  * @brief This function handles USART1 global interrupt / USART1 wake-up interrupt through EXTI line 25.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+  /* 必须清除错误标志: NF/ORE/FE 与 IDLE 共享同一 IRQ,
+   * 不清除会导致 ISR 死循环, CPU 饿死 while(1) */
+  if (LL_USART_IsActiveFlag_ORE(USART1))  LL_USART_ClearFlag_ORE(USART1);
+  if (LL_USART_IsActiveFlag_FE(USART1))   LL_USART_ClearFlag_FE(USART1);
+  if (LL_USART_IsActiveFlag_NE(USART1))   LL_USART_ClearFlag_NE(USART1);
+
+  if (LL_USART_IsActiveFlag_IDLE(USART1)) {
+      LL_USART_ClearFlag_IDLE(USART1);
+      Comm_OnIdleIRQ();
+  }
+  /* USER CODE END USART1_IRQn 0 */
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
 }
 
 /**
@@ -924,6 +963,16 @@ static inline void M2_UpdateElecAngle(void)
     }
     if (g_M2_CtrlMode == MODE_OPEN_LOOP) {
         OpenLoop_IncAngle(&g_M2_ElecAngle_Q15, &g_M2_AngleDelta, g_M2_AngleDelta_Target);
+        /* 追踪机械位置: AngleDelta / POLE_PAIRS → g_M2_StepAngle_Ref
+         * 强制 signed 除法, 避免 int32_t / 50U 隐式转 unsigned 导致负值爆炸 */
+        {
+            static int32_t frac_acc = 0;
+            frac_acc += (int32_t)g_M2_AngleDelta;
+            int32_t pp = (int32_t)M2_POLE_PAIRS;
+            int32_t mech_inc = frac_acc / pp;
+            frac_acc -= mech_inc * pp;
+            g_M2_StepAngle_Ref += mech_inc;
+        }
         return;
     }
     g_M2_ElecAngle_Q15 = (int16_t)((uint16_t)g_Enc2_Angle * M2_POLE_PAIRS)

@@ -32,6 +32,7 @@
 #include "foc_adapt.h"
 #include "vofa_engine.h"
 #include "follow_m1m2.h"
+#include "comm_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -182,6 +183,9 @@ int main(void)
   /* 启动TIM4 1kHz VOFA 引擎 → 自动填帧 + DMA 发送 (优先级10, 最低) */
   Vofa_StartTIM4();
 
+  /* RK3576 通信协议: RX DMA Circular + IDLE 中断 + 状态帧 TX */
+  Comm_Init();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -210,6 +214,9 @@ int main(void)
 
     StepCap_ArmAndAlign();    /* 电流环阶跃响应测试 */
     StepCap_Playback();
+
+    Protocol_Poll();          /* RK3576 协议: 解析 RX 缓冲区 + CRC + 命令派发 + 看门狗 */
+    g_UpSeqNo++;              /* 主循环存活证明 (状态帧 UpSeqNo 字段) */
 
   }
   /* USER CODE END 3 */
@@ -1376,11 +1383,32 @@ static void MX_USART1_UART_Init(void)
 
   LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_1, LL_DMA_MDATAALIGN_BYTE);
 
+  /* USART1_RX Init */
+  LL_DMA_SetPeriphRequest(DMA1, LL_DMA_CHANNEL_2, LL_DMAMUX_REQ_USART1_RX);
+
+  LL_DMA_SetDataTransferDirection(DMA1, LL_DMA_CHANNEL_2, LL_DMA_DIRECTION_PERIPH_TO_MEMORY);
+
+  LL_DMA_SetChannelPriorityLevel(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PRIORITY_LOW);
+
+  LL_DMA_SetMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MODE_CIRCULAR);
+
+  LL_DMA_SetPeriphIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PERIPH_NOINCREMENT);
+
+  LL_DMA_SetMemoryIncMode(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MEMORY_INCREMENT);
+
+  LL_DMA_SetPeriphSize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_PDATAALIGN_BYTE);
+
+  LL_DMA_SetMemorySize(DMA1, LL_DMA_CHANNEL_2, LL_DMA_MDATAALIGN_BYTE);
+
+  /* USART1 interrupt Init */
+  NVIC_SetPriority(USART1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),9, 0));
+  NVIC_EnableIRQ(USART1_IRQn);
+
   /* USER CODE BEGIN USART1_Init 1 */
 
   /* USER CODE END USART1_Init 1 */
   USART_InitStruct.PrescalerValue = LL_USART_PRESCALER_DIV1;
-  USART_InitStruct.BaudRate = 1152000;
+  USART_InitStruct.BaudRate = 1000000;
   USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
   USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
   USART_InitStruct.Parity = LL_USART_PARITY_NONE;
@@ -1422,8 +1450,11 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
-  NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),0, 0));
+  NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),8, 0));
   NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+  /* DMA1_Channel2_IRQn interrupt configuration */
+  NVIC_SetPriority(DMA1_Channel2_IRQn, NVIC_EncodePriority(NVIC_GetPriorityGrouping(),7, 0));
+  NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
 }
 
@@ -1573,10 +1604,12 @@ static void M1_UpdateCtrlRef(void)
         && (g_StepCapState == 0 || g_StepCapState == 3 || g_StepCapMotor != 1)
         && !g_CurrLoopCalibInProgress_M1)
     {
-        g_M1_Idq_Ref.d = MA_TO_Q15(0);
+        g_M1_Idq_Ref.d = MA_TO_Q15(g_M1_Id_Hold_mA);
         g_M1_Idq_Ref.q = MA_TO_Q15(g_M1_Iq_Ref_mA);
-        g_M1_AngleDelta_Target = RPM_to_AngleDelta(
-                g_M1_RPM_Cmd, M1_POLE_PAIRS, ENC_ISR_FREQ_HZ);
+        if (g_M1_RPM_Cmd != 0) {
+            g_M1_AngleDelta_Target = RPM_to_AngleDelta(
+                    g_M1_RPM_Cmd, M1_POLE_PAIRS, ENC_ISR_FREQ_HZ);
+        }
     }
     if (g_M1_CtrlMode == MODE_STEP_ANGLE
         && !g_CurrLoopCalibInProgress_M1)
@@ -1593,10 +1626,18 @@ static void M2_UpdateCtrlRef(void)
         && (g_StepCapState == 0 || g_StepCapState == 3 || g_StepCapMotor != 0)
         && !g_CurrLoopCalibInProgress_M2)
     {
-        g_M2_Idq_Ref.d = MA_TO_Q15(0);
+        g_M2_Idq_Ref.d = MA_TO_Q15(g_M2_Id_Hold_mA);
         g_M2_Idq_Ref.q = MA_TO_Q15(g_M2_Iq_Ref_mA);
-        g_M2_AngleDelta_Target = RPM_to_AngleDelta(
-                g_M2_RPM_Cmd, M2_POLE_PAIRS, ENC_ISR_FREQ_HZ);
+        /* M2 开环位置模式: 比例控制, 避免 bang-bang 过冲
+         * 制动距离 = Target*(Target+1)/2 / POLE_PAIRS counts
+         * 用比例增益将 mech_err 映射到 AngleDelta_Target,
+         * 限幅 ±50, 死区 ±1 count */
+        int32_t mech_err = g_M2_PosCmd - g_M2_StepAngle_Ref;
+        int32_t ad_target = mech_err * 2;        /* 比例增益 Kp=2 */
+        if (ad_target >  200) ad_target =  200;
+        if (ad_target < -200) ad_target = -200;
+        if (mech_err > -1 && mech_err < 1) ad_target = 0;  /* 死区 ±1 */
+        g_M2_AngleDelta_Target = (int16_t)ad_target;
     }
     if (g_M2_CtrlMode == MODE_STEP_ANGLE
         && !g_CurrLoopCalibInProgress_M2)
@@ -1722,27 +1763,31 @@ static void M2_ClampParams(void)
  * 每类校准 flag 为 one-shot: 检测到后立即清零再调用 */
 static void PollCalibTriggers(void)
 {
-    /* KTH71 ANLC 非线性校准 */
+    /* KTH71 ANLC 非线性校准 (阻塞 ~15s) */
     if (g_DoKth71Calib_M2) {
         g_DoKth71Calib_M2 = 0;
         Main_RunKth71Calib();
+        g_CommTimeoutMs = 200;
     }
     if (g_DoKth71Calib_M1) {
         g_DoKth71Calib_M1 = 0;
         Main_RunKth71Calib_M1();
+        g_CommTimeoutMs = 200;
     }
 
-    /* 电角度零点标定 */
+    /* 电角度零点标定 (阻塞 ~4s) */
     if (g_DoZeroCalib_M2) {
         g_DoZeroCalib_M2 = 0;
         Main_RunZeroCalib();
+        g_CommTimeoutMs = 200;
     }
     if (g_DoZeroCalib_M1) {
         g_DoZeroCalib_M1 = 0;
         Main_RunZeroCalib_M1();
+        g_CommTimeoutMs = 200;
     }
 
-    /* 电流环自校准 (启动 + 完成回调) */
+    /* 电流环自校准 (非阻塞, TIM3 ISR 驱动, ~3s) */
     if (g_DoCurrLoopCalib_M2) {
         g_DoCurrLoopCalib_M2 = 0;
         CalibM2_Start();
@@ -1750,6 +1795,7 @@ static void PollCalibTriggers(void)
     if (g_CurrLoopCalibResultReady_M2) {
         g_CurrLoopCalibResultReady_M2 = 0;
         CalibM2_OnDone();
+        g_CommTimeoutMs = 200;
     }
     if (g_DoCurrLoopCalib_M1) {
         g_DoCurrLoopCalib_M1 = 0;
@@ -1758,6 +1804,7 @@ static void PollCalibTriggers(void)
     if (g_CurrLoopCalibResultReady_M1) {
         g_CurrLoopCalibResultReady_M1 = 0;
         CalibM1_OnDone();
+        g_CommTimeoutMs = 200;
     }
 
     /* Flash 参数手动擦除 */
